@@ -99,44 +99,126 @@ def mostrar_comparacion_periodos(df_comparacion):
         df_comparacion (pd.DataFrame): DataFrame con comparación
     """
     if df_comparacion.empty:
+        st.warning("No hay datos suficientes para comparar períodos")
         return
     
     row = df_comparacion.iloc[0]
     
-    col1, col2, col3 = st.columns(3)
+    # Extraer valores
+    alertas_actuales = int(row.get('alertas_actuales', 0))
+    alertas_anteriores = int(row.get('alertas_anteriores', 0))
+    score_actual = row.get('score_actual')
+    score_anterior = row.get('score_anterior')
+    cambio_porcentual = row.get('cambio_porcentual')
+    
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        cambio = row.get('cambio_porcentual')
-        if cambio is not None and pd.notna(cambio):
-            delta_color = "inverse" if cambio > 0 else "normal"
-            delta_text = f"{cambio:+.1f}% vs período anterior"
+        # Determinar color del delta
+        if cambio_porcentual is not None and pd.notna(cambio_porcentual):
+            # Rojo si aumentó (malo), verde si disminuyó (bueno)
+            delta_color = "inverse" if cambio_porcentual > 0 else "normal"
+            delta_text = f"{cambio_porcentual:+.1f}%"
         else:
             delta_color = "off"
-            delta_text = "Sin datos previos"
+            delta_text = "Sin datos"
         
         st.metric(
-            label="📊 Alertas (7 días)",
-            value=f"{int(row.get('alertas_actuales', 0)):,}",
+            label="📊 Alertas Período Actual",
+            value=f"{alertas_actuales:,}",
             delta=delta_text,
             delta_color=delta_color,
-            help="Comparación con los 7 días anteriores"
+            help="Número de alertas en el período seleccionado comparado con el período anterior"
         )
     
     with col2:
-        score_actual = row.get('score_actual')
         st.metric(
-            label="📈 Score Actual",
-            value=f"{score_actual:.1f}" if score_actual is not None else "N/A",
-            help="Score promedio de anomalías en los últimos 7 días"
+            label="📉 Alertas Período Anterior",
+            value=f"{alertas_anteriores:,}",
+            help="Número de alertas en el período anterior (mismo número de días)"
         )
     
     with col3:
-        score_anterior = row.get('score_anterior')
+        # Calcular cambio en score
+        if score_actual is not None and score_anterior is not None:
+            cambio_score = score_actual - score_anterior
+            delta_score = f"{cambio_score:+.2f}"
+            delta_color_score = "inverse" if cambio_score > 0 else "normal"
+        else:
+            delta_score = None
+            delta_color_score = "off"
+        
         st.metric(
-            label="📉 Score Anterior",
-            value=f"{score_anterior:.1f}" if score_anterior is not None else "N/A",
+            label="📈 Score Promedio Actual",
+            value=f"{score_actual:.2f}" if score_actual is not None else "N/A",
+            delta=delta_score,
+            delta_color=delta_color_score,
+            help="Score promedio de severidad de anomalías (mayor = más severo)"
+        )
+    
+    with col4:
+        st.metric(
+            label="📊 Score Promedio Anterior",
+            value=f"{score_anterior:.2f}" if score_anterior is not None else "N/A",
             help="Score promedio del período anterior"
         )
+    
+    # # Mensaje interpretativo
+    # if cambio_porcentual is not None and pd.notna(cambio_porcentual):
+    #     if cambio_porcentual > 50:
+    #         st.error(f"⚠️ **ALERTA:** Las alertas aumentaron significativamente ({cambio_porcentual:+.1f}%). Se recomienda investigar.")
+    #     elif cambio_porcentual > 20:
+    #         st.warning(f"⚡ **Atención:** Aumento moderado de alertas ({cambio_porcentual:+.1f}%).")
+    #     elif cambio_porcentual < -20:
+    #         st.success(f"✅ **Positivo:** Las alertas disminuyeron ({cambio_porcentual:.1f}%).")
+    #     else:
+    #         st.info(f"ℹ️ Cambio normal en alertas ({cambio_porcentual:+.1f}%).")
+# def mostrar_comparacion_periodos(df_comparacion):
+#     """
+#     Muestra comparación entre períodos
+    
+#     Args:
+#         df_comparacion (pd.DataFrame): DataFrame con comparación
+#     """
+#     if df_comparacion.empty:
+#         return
+    
+#     row = df_comparacion.iloc[0]
+    
+#     col1, col2, col3 = st.columns(3)
+    
+#     with col1:
+#         cambio = row.get('cambio_porcentual')
+#         if cambio is not None and pd.notna(cambio):
+#             delta_color = "inverse" if cambio > 0 else "normal"
+#             delta_text = f"{cambio:+.1f}% vs período anterior"
+#         else:
+#             delta_color = "off"
+#             delta_text = "Sin datos previos"
+        
+#         st.metric(
+#             label="📊 Alertas (7 días)",
+#             value=f"{int(row.get('alertas_actuales', 0)):,}",
+#             delta=delta_text,
+#             delta_color=delta_color,
+#             help="Comparación con los 7 días anteriores"
+#         )
+    
+#     with col2:
+#         score_actual = row.get('score_actual')
+#         st.metric(
+#             label="📈 Score Actual",
+#             value=f"{score_actual:.1f}" if score_actual is not None else "N/A",
+#             help="Score promedio de anomalías en los últimos 7 días"
+#         )
+    
+#     with col3:
+#         score_anterior = row.get('score_anterior')
+#         st.metric(
+#             label="📉 Score Anterior",
+#             value=f"{score_anterior:.1f}" if score_anterior is not None else "N/A",
+#             help="Score promedio del período anterior"
+#         )
 
 def tarjeta_alerta(alerta, mostrar_detalles=True):
     """

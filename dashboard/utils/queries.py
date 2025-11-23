@@ -3,6 +3,37 @@ Queries SQL reutilizables para el dashboard
 """
 
 # ============================================================================
+# QUERIES DE KPIs VENTANA APP
+# ============================================================================
+
+QUIERY_ALERTAS_CRITICAS_APP = """
+SELECT 
+    COUNT(*) 
+FROM alertas_dispensacion 
+WHERE severidad = 'critico'
+"""
+
+QUIERY_ALERTAS_ALTAS_APP = """
+SELECT 
+    COUNT(*) 
+FROM alertas_dispensacion 
+WHERE severidad = 'alto'
+"""
+
+QUIERY_ALERTAS_MEDIAS_APP = """
+SELECT 
+    COUNT(*) 
+FROM alertas_dispensacion 
+WHERE severidad = 'medio'
+"""
+
+QUIERY_ALERTAS_TOTAL_APP = """
+SELECT 
+    COUNT(*) 
+FROM alertas_dispensacion
+"""
+
+# ============================================================================
 # QUERIES DE KPIs
 # ============================================================================
 
@@ -14,21 +45,20 @@ SELECT
     COUNT(*) as total_alertas,
     COUNT(DISTINCT cod_cajero) as cajeros_con_alertas
 FROM alertas_dispensacion
---WHERE fecha_hora >= NOW() - INTERVAL '30 days'
+WHERE fecha_hora >= %s AND fecha_hora <= %s
 """
-
-
 
 QUERY_ALERTAS_POR_DIA = """
 SELECT 
     DATE(fecha_hora) as fecha,
     COUNT(*) FILTER (WHERE severidad = 'critico') as criticas,
-    COUNT(*) FILTER (WHERE severidad = 'alto') as altas,
-    COUNT(*) FILTER (WHERE severidad = 'medio') as medias
+    COUNT(*) FILTER (WHERE severidad = 'alto') as altas
+    --,
+    --COUNT(*) FILTER (WHERE severidad = 'medio') as medias
 FROM alertas_dispensacion
---WHERE fecha_hora >= NOW() - INTERVAL '30 days'
+WHERE fecha_hora >= %s AND fecha_hora <= %s
 GROUP BY DATE(fecha_hora)
-ORDER BY fecha DESC
+ORDER BY fecha ASC
 """
 
 # ============================================================================
@@ -83,7 +113,9 @@ SELECT
     f.departamento
 FROM alertas_dispensacion a
 INNER JOIN features_ml f ON a.cod_cajero = f.cod_cajero
-WHERE a.fecha_hora >= %s
+WHERE a.fecha_hora >= %s 
+  AND a.fecha_hora <= %s
+  AND a.severidad IN ('critico', 'alto')
   AND f.latitud IS NOT NULL 
   AND f.longitud IS NOT NULL
 ORDER BY a.score_anomalia DESC
@@ -105,7 +137,7 @@ SELECT
     f.departamento
 FROM alertas_dispensacion a
 LEFT JOIN features_ml f ON a.cod_cajero = f.cod_cajero
---WHERE a.fecha_hora >= NOW() - INTERVAL '30 days'
+WHERE a.fecha_hora >= %s  AND a.fecha_hora <= %s
 GROUP BY a.cod_cajero, f.municipio_dane, f.departamento
 ORDER BY num_alertas DESC, alertas_criticas DESC
 LIMIT %s
@@ -189,15 +221,16 @@ WITH periodo_actual AS (
         COUNT(*) as alertas_actuales,
         AVG(score_anomalia) as score_actual
     FROM alertas_dispensacion
-    --WHERE fecha_hora >= NOW() - INTERVAL '7 days'
+    WHERE fecha_hora >= %s AND fecha_hora <= %s
+    AND severidad = 'critico'
 ),
 periodo_anterior AS (
     SELECT 
         COUNT(*) as alertas_anteriores,
         AVG(score_anomalia) as score_anterior
     FROM alertas_dispensacion
-    --WHERE fecha_hora >= NOW() - INTERVAL '14 days'
-    --  AND fecha_hora < NOW() - INTERVAL '7 days'
+    WHERE fecha_hora >= %s AND fecha_hora < %s
+    AND severidad = 'critico'
 )
 SELECT 
     pa.alertas_actuales,

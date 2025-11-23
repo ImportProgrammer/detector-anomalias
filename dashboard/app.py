@@ -15,6 +15,9 @@ import streamlit as st
 import sys
 from pathlib import Path
 
+from utils.db import execute_query, test_connection
+from utils import queries
+
 # Agregar rutas al path
 dashboard_path = Path(__file__).parent
 sys.path.append(str(dashboard_path))
@@ -168,26 +171,47 @@ st.markdown("## 📈 Vista Rápida del Sistema")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
+    df = execute_query(queries.QUIERY_ALERTAS_CRITICAS_APP)
+    df_total = execute_query(queries.QUIERY_ALERTAS_TOTAL_APP)
+    valor = int(df.iloc[0, 0])
+    total = int(df_total.iloc[0,0])
+    valor_formateado = f"{valor:,}".replace(",", ".")
+    valor_porcentaje = f"{(valor/total):.2%}"
+    
     st.metric(
         label="🔴 Alertas Críticas",
-        value="--",
-        delta="Cargando...",
+        value=valor_formateado,
+        delta=valor_porcentaje,
         help="Anomalías de severidad crítica que requieren atención inmediata"
     )
 
 with col2:
+    df = execute_query(queries.QUIERY_ALERTAS_ALTAS_APP)
+    df_total = execute_query(queries.QUIERY_ALERTAS_TOTAL_APP)
+    valor = int(df.iloc[0, 0])
+    total = int(df_total.iloc[0,0])
+    valor_formateado = f"{valor:,}".replace(",", ".")
+    valor_porcentaje = f"{(valor/total):.2%}"
+    
     st.metric(
         label="🟡 Alertas Altas",
-        value="--",
-        delta="Cargando...",
+        value=valor_formateado,
+        delta=valor_porcentaje,
         help="Anomalías de severidad alta que requieren revisión"
     )
 
 with col3:
+    df = execute_query(queries.QUIERY_ALERTAS_MEDIAS_APP)
+    df_total = execute_query(queries.QUIERY_ALERTAS_TOTAL_APP)
+    valor = int(df.iloc[0, 0])
+    total = int(df_total.iloc[0,0])
+    valor_formateado = f"{valor:,}".replace(",", ".")
+    valor_porcentaje = f"{(valor/total):.2%}"
+    
     st.metric(
         label="🟢 Alertas Medias",
-        value="--",
-        delta="Cargando...",
+        value=valor_formateado,
+        delta=valor_porcentaje,
         help="Anomalías de severidad media para monitoreo"
     )
 

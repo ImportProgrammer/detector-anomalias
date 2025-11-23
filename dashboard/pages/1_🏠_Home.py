@@ -61,7 +61,7 @@ with col2:
 
 with col3:
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔄 Actualizar", use_container_width=True):
+    if st.button("🔄 Actualizar", width='stretch'):
         st.cache_data.clear()
         st.rerun()
 
@@ -74,7 +74,10 @@ st.markdown("---")
 st.markdown("### 📊 Indicadores Principales")
 
 # Cargar KPIs
-df_kpis = execute_query(queries.QUERY_KPIS_GENERALES)
+df_kpis = execute_query(
+    queries.QUERY_KPIS_GENERALES, 
+    (fecha_inicio, fecha_fin)
+    )
 
 if not df_kpis.empty:
     mostrar_kpis(df_kpis)
@@ -87,27 +90,123 @@ st.markdown("---")
 # COMPARACIÓN DE PERÍODOS
 # ============================================================================
 
+def fecha_normalizada(fecha):
+    meses = {
+        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
+    }
+    return f"{fecha.day} de {meses[fecha.month]} de {fecha.year}"
+
 st.markdown("### 📈 Comparación de Períodos")
 
-df_comparacion = execute_query(queries.QUERY_COMPARACION_PERIODOS)
-mostrar_comparacion_periodos(df_comparacion)
+# Calcular períodos
+dias_diferencia = (fecha_fin - fecha_inicio).days
 
+# Período actual
+periodo_actual_inicio = datetime.combine(fecha_inicio, datetime.min.time())
+periodo_actual_fin = datetime.combine(fecha_fin, datetime.max.time())
+
+# Período anterior (misma cantidad de días hacia atrás)
+periodo_anterior_fin = fecha_inicio
+periodo_anterior_inicio = fecha_inicio - timedelta(days=dias_diferencia)
+periodo_anterior_inicio = datetime.combine(periodo_anterior_inicio, datetime.min.time())
+periodo_anterior_fin = datetime.combine(periodo_anterior_fin, datetime.min.time())
+
+
+texto_periodo_actual = f"{fecha_normalizada(periodo_actual_inicio)} al {fecha_normalizada(periodo_actual_fin)}"
+texto_periodo_anterior = f"{fecha_normalizada(periodo_anterior_inicio)} al {fecha_normalizada(periodo_anterior_fin)}"
+
+st.markdown(
+    f"""
+    <div style="color: #555; font-size: 0.95rem; 
+                margin-top: 10px; 
+                margin-bottom: 15px;">
+        Comparación de <b>alertas críticas</b> entre 
+        <span style="color:#333;">{texto_periodo_actual}</span> 
+        y 
+        <span style="color:#333;">{texto_periodo_anterior}</span>.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# Ejecutar query
+df_comparacion = execute_query(
+    queries.QUERY_COMPARACION_PERIODOS,
+    params=(
+        periodo_actual_inicio,
+        periodo_actual_fin,
+        periodo_anterior_inicio,
+        periodo_anterior_fin
+    )
+)
+
+if not df_comparacion.empty:
+    mostrar_comparacion_periodos(df_comparacion)
+else:
+    st.warning("⚠️ No hay datos de alertas disponibles. Asegúrate de haber ejecutado el proceso de detección.")
 st.markdown("---")
 
-# ============================================================================
-# LAYOUT: MAPA + TENDENCIA
-# ============================================================================
+# # ============================================================================
+# # LAYOUT: MAPA + TENDENCIA
+# # ============================================================================
 
-col_mapa, col_tendencia = st.columns([3, 2])
+# col_mapa, col_tendencia = st.columns(2)
 
-with col_mapa:
-    st.markdown("### 🗺️ Mapa de Alertas Geográficas")
+# with col_mapa:
+#     st.markdown("### 🗺️ Mapa de Alertas Geográficas")
     
+#     # Cargar alertas con ubicación
+#     fecha_desde = datetime.combine(fecha_inicio, datetime.min.time())
+#     df_alertas_mapa = execute_query(
+#         queries.QUERY_ALERTAS_CON_UBICACION,
+#         params=(
+#             datetime.combine(fecha_inicio, datetime.min.time()),
+#             datetime.combine(fecha_fin, datetime.max.time()),
+#             500
+#         )
+#     )
+    
+#     if not df_alertas_mapa.empty:
+#         fig_mapa = crear_mapa_alertas(df_alertas_mapa)
+#         if fig_mapa:
+#             st.plotly_chart(fig_mapa, config={'displayModeBar': False})
+#     else:
+#         st.info("No hay alertas con ubicación geográfica en el período seleccionado")
+
+# with col_tendencia:
+#     st.markdown("### 📊 Tendencia Temporal")
+    
+#     # Cargar tendencia por día
+#     df_tendencia = execute_query(
+#         queries.QUERY_ALERTAS_POR_DIA, 
+#         params=(
+#             datetime.combine(fecha_inicio, datetime.min.time()),
+#             datetime.combine(fecha_fin, datetime.max.time())
+#         )
+#     )
+    
+#     if not df_tendencia.empty:
+#         fig_tendencia = crear_grafico_tendencia_temporal(df_tendencia)
+#         if fig_tendencia:
+#             st.plotly_chart(fig_tendencia, config={'displayModeBar': False})
+#     else:
+#         st.info("No hay datos de tendencia disponibles")
+
+# st.markdown("---")
+
+# ============================================================================
+# MAPA Y TENDENCIA EN TABS
+# ============================================================================
+
+tab1, tab2 = st.tabs(["🗺️ Mapa Geográfico", "📊 Tendencia Temporal"])
+
+with tab1:
     # Cargar alertas con ubicación
-    fecha_desde = datetime.combine(fecha_inicio, datetime.min.time())
     df_alertas_mapa = execute_query(
         queries.QUERY_ALERTAS_CON_UBICACION,
-        params=(fecha_desde, 500)
+        params=(fecha_inicio, fecha_fin, 500)
     )
     
     if not df_alertas_mapa.empty:
@@ -115,22 +214,44 @@ with col_mapa:
         if fig_mapa:
             st.plotly_chart(fig_mapa, use_container_width=True)
     else:
-        st.info("No hay alertas con ubicación geográfica en el período seleccionado")
+        st.info("No hay alertas con ubicación")
 
-with col_tendencia:
-    st.markdown("### 📊 Tendencia Temporal")
-    
-    # Cargar tendencia por día
-    df_tendencia = execute_query(queries.QUERY_ALERTAS_POR_DIA)
+with tab2:
+    df_tendencia = execute_query(
+        queries.QUERY_ALERTAS_POR_DIA,
+        params=(fecha_inicio, fecha_fin)
+    )
     
     if not df_tendencia.empty:
         fig_tendencia = crear_grafico_tendencia_temporal(df_tendencia)
         if fig_tendencia:
             st.plotly_chart(fig_tendencia, use_container_width=True)
     else:
-        st.info("No hay datos de tendencia disponibles")
+        st.info("No hay datos de tendencia")
 
-st.markdown("---")
+# ============================================================================
+# TENDENCIAS TEMPORALES CON BANDAS
+# ============================================================================
+
+st.markdown(
+    "### 📊 Comportamiento Normal vs Picos Anómalos"
+)
+
+df_tendencia = execute_query(
+    queries.QUERY_ALERTAS_POR_DIA,
+    params=(
+        datetime.combine(fecha_inicio, datetime.min.time()),
+        datetime.combine(fecha_fin, datetime.max.time())
+    )
+)
+
+if not df_tendencia.empty:
+    from components.graficos import crear_grafico_tendencia_con_bandas
+    fig_tendencia_bandas = crear_grafico_tendencia_con_bandas(df_tendencia)
+    if fig_tendencia_bandas:
+        st.plotly_chart(fig_tendencia_bandas, use_container_width=True, config={'displayModeBar': True})
+else:
+    st.info("No hay datos de tendencia disponibles")
 
 # ============================================================================
 # PATRONES HORARIOS
@@ -143,7 +264,7 @@ df_heatmap = execute_query(queries.QUERY_HEATMAP_HORARIO)
 if not df_heatmap.empty:
     fig_heatmap = crear_heatmap_horario(df_heatmap)
     if fig_heatmap:
-        st.plotly_chart(fig_heatmap, use_container_width=True)
+        st.plotly_chart(fig_heatmap, config={'displayModeBar': False})
 else:
     st.info("No hay datos de patrones horarios disponibles")
 
@@ -157,20 +278,20 @@ st.markdown("### 🏆 Top Cajeros con Más Alertas")
 
 df_top_cajeros = execute_query(
     queries.QUERY_TOP_CAJEROS_PROBLEMATICOS,
-    params=(20,)
+    params=(fecha_inicio, fecha_fin, 20)
 )
 
 if not df_top_cajeros.empty:
     # Gráfico
     fig_top = crear_grafico_top_cajeros(df_top_cajeros)
     if fig_top:
-        st.plotly_chart(fig_top, use_container_width=True)
+        st.plotly_chart(fig_top, config={'displayModeBar': False})
     
     # Tabla detallada
     with st.expander("📋 Ver tabla detallada"):
         st.dataframe(
             df_top_cajeros,
-            use_container_width=True,
+            width='stretch',
             column_config={
                 'cod_cajero': 'Cajero',
                 'num_alertas': st.column_config.NumberColumn('Total Alertas', format="%d"),
@@ -214,15 +335,15 @@ if not df_alertas_recientes.empty:
     # Mostrar tabla
     st.dataframe(
         df_alertas_recientes.style.apply(resaltar_severidad, axis=1),
-        use_container_width=True,
+        width='stretch',
         column_config={
             'id': None,  # Ocultar ID
             'cod_cajero': 'Cajero',
             'fecha_hora': st.column_config.DatetimeColumn('Fecha/Hora'),
             'severidad': 'Severidad',
             'score_anomalia': st.column_config.NumberColumn('Score', format="%.1f"),
-            'monto_dispensado': st.column_config.NumberColumn('Monto', format="$%,.0f"),
-            'monto_esperado': st.column_config.NumberColumn('Esperado', format="$%,.0f"),
+            'monto_dispensado': st.column_config.NumberColumn('Monto', format="$%.0f"),
+            'monto_esperado': st.column_config.NumberColumn('Esperado', format="$%.0f"),
             'descripcion': st.column_config.TextColumn('Descripción', width='large'),
             'razones': st.column_config.TextColumn('Razones', width='large')
         },

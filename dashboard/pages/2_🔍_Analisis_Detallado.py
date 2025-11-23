@@ -1,0 +1,395 @@
+"""
+🔍 Análisis Detallado - Drill-down por Cajero Específico
+"""
+
+import streamlit as st
+import sys
+from pathlib import Path
+from datetime import datetime, timedelta
+import pandas as pd
+
+# Agregar path del dashboard
+dashboard_path = Path(__file__).parent.parent
+sys.path.append(str(dashboard_path))
+
+from utils.db import execute_query, test_connection
+from components.kpis import mostrar_kpis_cajero
+from components.graficos import crear_grafico_tendencia_temporal, crear_grafico_comparacion_montos
+from components.mapa import crear_mapa_alertas
+
+# ============================================================================
+# CONFIGURACIÓN DE PÁGINA
+# ============================================================================
+
+st.set_page_config(
+    page_title="Análisis Detallado - Detección de Fraudes",
+    page_icon="🔍",
+    layout="wide"
+)
+
+st.title("🔍 Análisis Detallado por Cajero")
+
+# ============================================================================
+# VERIFICAR CONEXIÓN
+# ============================================================================
+
+if not test_connection():
+    st.error("❌ No se pudo conectar a la base de datos. Verifica la configuración.")
+    st.stop()
+
+# ============================================================================
+# BÚSQUEDA DE CAJERO
+# ============================================================================
+
+st.markdown("### 🔎 Buscar Cajero")
+
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    # Obtener lista de cajeros con alertas
+    query_cajeros = """
+    SELECT DISTINCT cod_cajero 
+    FROM alertas_dispensacion 
+    ORDER BY cod_cajero
+    """
+    df_cajeros_disponibles = execute_query(query_cajeros)
+    
+    if not df_cajeros_disponibles.empty:
+        cajeros_list = df_cajeros_disponibles['cod_cajero'].tolist()
+        
+        # Búsqueda con selectbox
+        cod_cajero = st.selectbox(
+            "Seleccione un cajero",
+            options=cajeros_list,
+            help="Lista de cajeros con alertas detectadas"
+        )
+    else:
+        st.warning("No hay cajeros con alertas en el sistema")
+        st.stop()
+
+with col2:
+    st.markdown("<br>", unsafe_allow_html=True)
+    buscar = st.button("🔍 Analizar", use_container_width=True, type="primary")
+
+if not buscar and 'ultimo_cajero' not in st.session_state:
+    st.info("👆 Seleccione un cajero y presione 'Analizar' para ver el análisis detallado")
+    st.stop()
+
+# Guardar último cajero buscado
+if buscar:
+    st.session_state['ultimo_cajero'] = cod_cajero
+else:
+    cod_cajero = st.session_state.get('ultimo_cajero')
+
+st.markdown("---")
+
+# ============================================================================
+# INFORMACIÓN BÁSICA DEL CAJERO
+# ============================================================================
+
+st.markdown(f"## 🏧 Cajero: {cod_cajero}")
+
+# Obtener información del cajero
+query_info_cajero = """
+SELECT 
+    f.cod_cajero,
+    f.dispensacion_promedio,
+    f.dispensacion_std,
+    f.dispensacion_max,
+    f.coef_variacion,
+    f.pct_anomalias_3std,
+    f.latitud,
+    f.longitud,
+    f.municipio_dane,
+    f.departamento,
+    f.num_periodos_15min,
+    f.transacciones_totales
+FROM features_ml f
+WHERE f.cod_cajero = %s
+"""
+
+df_info = execute_query(query_info_cajero, params=(cod_cajero,))
+
+if df_info.empty:
+    st.error(f"No se encontró información para el cajero {cod_cajero}")
+    st.stop()
+
+info_cajero = df_info.iloc[0].to_dict()
+
+# Obtener alertas del cajero
+query_alertas_cajero = """
+SELECT COUNT(*) as total_alertas
+FROM alertas_dispensacion
+WHERE cod_cajero = %s
+"""
+
+df_count = execute_query(query_alertas_cajero, params=(cod_cajero,))
+num_alertas = int(df_count.iloc[0]['total_alertas']) if not df_count.empty else 0
+
+# Mostrar KPIs del cajero
+mostrar_kpis_cajero(info_cajero, num_alertas)
+
+st.markdown("---")
+
+# ============================================================================
+# INFORMACIÓN GEOGRÁFICA
+# ============================================================================
+
+col_info, col_mapa = st.columns([2, 1])
+
+with col_info:
+    st.markdown("### 📍 Información de Ubicación")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric("🗺️ Departamento", info_cajero.get('departamento', 'N/A'))
+    with col_b:
+        st.metric("📍 Municipio", info_cajero.get('municipio_dane', 'N/A'))
+    
+    col_c, col_d = st.columns(2)
+    with col_c:
+        lat = info_cajero.get('latitud')
+        st.metric("🌐 Latitud", f"{lat:.6f}" if lat else "N/A")
+    with col_d:
+        lon = info_cajero.get('longitud')
+        st.metric("🌐 Longitud", f"{lon:.6f}" if lon else "N/A")
+
+with col_mapa:
+    st.markdown("### 🗺️ Ubicación en Mapa")
+    
+    if info_cajero.get('latitud') and info_cajero.get('longitud'):
+        # Crear DataFrame para el mapa (solo este cajero)
+        df_mapa_cajero = pd.DataFrame([{
+            'cod_cajero': cod_cajero,
+            'latitud': info_cajero['latitud'],
+            'longitud': info_cajero['longitud'],
+            'severidad': 'critico',
+            'score_anomalia': 100,
+            'monto_dispensado': info_cajero['dispensacion_promedio'],
+            'descripcion': f"Cajero {cod_cajero}",
+            'municipio_dane': info_cajero.get('municipio_dane', 'N/A'),
+            'departamento': info_cajero.get('departamento', 'N/A')
+        }])
+        
+        fig_mapa = crear_mapa_alertas(df_mapa_cajero)
+        if fig_mapa:
+            st.plotly_chart(fig_mapa, use_container_width=True, config={'displayModeBar': False})
+    else:
+        st.info("Sin coordenadas disponibles")
+
+st.markdown("---")
+
+# ============================================================================
+# TIMELINE DE ALERTAS
+# ============================================================================
+
+st.markdown("### 📈 Timeline de Alertas")
+
+# Filtros de fecha
+col_f1, col_f2 = st.columns(2)
+
+with col_f1:
+    fecha_desde = st.date_input(
+        "Desde",
+        value=datetime.now() - timedelta(days=90),
+        key="fecha_desde_detalle"
+    )
+
+with col_f2:
+    fecha_hasta = st.date_input(
+        "Hasta",
+        value=datetime.now(),
+        key="fecha_hasta_detalle"
+    )
+
+# Query timeline
+query_timeline = """
+SELECT 
+    DATE(fecha_hora) as fecha,
+    COUNT(*) FILTER (WHERE severidad = 'critico') as criticas,
+    COUNT(*) FILTER (WHERE severidad = 'alto') as altas,
+    COUNT(*) FILTER (WHERE severidad = 'medio') as medias
+FROM alertas_dispensacion
+WHERE cod_cajero = %s
+  AND fecha_hora >= %s
+  AND fecha_hora <= %s
+GROUP BY DATE(fecha_hora)
+ORDER BY fecha ASC
+"""
+
+df_timeline = execute_query(
+    query_timeline,
+    params=(
+        cod_cajero,
+        datetime.combine(fecha_desde, datetime.min.time()),
+        datetime.combine(fecha_hasta, datetime.max.time())
+    )
+)
+
+if not df_timeline.empty:
+    fig_timeline = crear_grafico_tendencia_temporal(df_timeline)
+    if fig_timeline:
+        st.plotly_chart(fig_timeline, use_container_width=True, config={'displayModeBar': True})
+else:
+    st.info("No hay alertas en el período seleccionado")
+
+st.markdown("---")
+
+# ============================================================================
+# COMPARACIÓN CON CAJEROS SIMILARES
+# ============================================================================
+
+st.markdown("### 📊 Comparación con Cajeros Similares")
+
+# Obtener cajeros del mismo municipio
+query_comparacion = """
+SELECT 
+    a.cod_cajero,
+    COUNT(*) as num_alertas,
+    ROUND(AVG(a.score_anomalia), 2) as score_promedio
+FROM alertas_dispensacion a
+INNER JOIN features_ml f ON a.cod_cajero = f.cod_cajero
+WHERE f.municipio_dane = %s
+  AND a.cod_cajero != %s
+GROUP BY a.cod_cajero
+ORDER BY num_alertas DESC
+LIMIT 10
+"""
+
+df_comparacion = execute_query(
+    query_comparacion,
+    params=(info_cajero.get('municipio_dane', 'N/A'), cod_cajero)
+)
+
+if not df_comparacion.empty:
+    # Agregar el cajero actual para comparación
+    cajero_actual = pd.DataFrame([{
+        'cod_cajero': cod_cajero,
+        'num_alertas': num_alertas,
+        'score_promedio': df_info.iloc[0].get('pct_anomalias_3std', 0)
+    }])
+    
+    df_comparacion_full = pd.concat([cajero_actual, df_comparacion], ignore_index=True)
+    
+    # Gráfico de comparación
+    import plotly.graph_objects as go
+    
+    fig_comp = go.Figure()
+    
+    # Destacar el cajero actual
+    colors = ['red' if c == cod_cajero else 'lightblue' for c in df_comparacion_full['cod_cajero']]
+    
+    fig_comp.add_trace(go.Bar(
+        x=df_comparacion_full['cod_cajero'].astype(str),
+        y=df_comparacion_full['num_alertas'],
+        marker_color=colors,
+        text=df_comparacion_full['num_alertas'],
+        textposition='outside'
+    ))
+    
+    fig_comp.update_layout(
+        title=f'Comparación con Cajeros en {info_cajero.get("municipio_dane", "la misma zona")}',
+        xaxis_title='Cajero',
+        yaxis_title='Número de Alertas',
+        height=400,
+        showlegend=False
+    )
+    
+    st.plotly_chart(fig_comp, use_container_width=True, config={'displayModeBar': True})
+    
+    st.caption(f"🔴 Rojo = Cajero {cod_cajero} (actual) | 🔵 Azul = Otros cajeros de la zona")
+else:
+    st.info(f"No hay otros cajeros en {info_cajero.get('municipio_dane', 'esta zona')} para comparar")
+
+st.markdown("---")
+
+# ============================================================================
+# TABLA DETALLADA DE ALERTAS
+# ============================================================================
+
+st.markdown("### 🚨 Historial de Alertas Detallado")
+
+# Filtro por severidad
+severidades = st.multiselect(
+    "Filtrar por severidad",
+    options=['critico', 'alto', 'medio'],
+    default=['critico', 'alto', 'medio']
+)
+
+# Query alertas detalladas
+query_alertas_detalle = """
+SELECT 
+    id,
+    fecha_hora,
+    severidad,
+    score_anomalia,
+    monto_dispensado,
+    monto_esperado,
+    desviacion_std,
+    descripcion,
+    razones
+FROM alertas_dispensacion
+WHERE cod_cajero = %s
+  AND severidad = ANY(%s)
+ORDER BY fecha_hora DESC
+LIMIT 500
+"""
+
+df_alertas_detalle = execute_query(
+    query_alertas_detalle,
+    params=(cod_cajero, severidades)
+)
+
+if not df_alertas_detalle.empty:
+    # Configurar colores por severidad
+    def resaltar_severidad(row):
+        if row['severidad'] == 'critico':
+            return ['background-color: #ffebee'] * len(row)
+        elif row['severidad'] == 'alto':
+            return ['background-color: #fff3e0'] * len(row)
+        elif row['severidad'] == 'medio':
+            return ['background-color: #e8f5e9'] * len(row)
+        return [''] * len(row)
+    
+    st.dataframe(
+        df_alertas_detalle.style.apply(resaltar_severidad, axis=1),
+        use_container_width=True,
+        column_config={
+            'id': None,
+            'fecha_hora': st.column_config.DatetimeColumn('Fecha/Hora', format='DD/MM/YYYY HH:mm'),
+            'severidad': 'Severidad',
+            'score_anomalia': st.column_config.NumberColumn('Score', format='%.1f'),
+            'monto_dispensado': st.column_config.NumberColumn('Monto', format='$%.0f'),
+            'monto_esperado': st.column_config.NumberColumn('Esperado', format='$%.0f'),
+            'desviacion_std': st.column_config.NumberColumn('Desv. Std', format='%.2f'),
+            'descripcion': st.column_config.TextColumn('Descripción', width='large'),
+            'razones': st.column_config.TextColumn('Razones', width='large')
+        },
+        hide_index=True,
+        height=500
+    )
+    
+    # Botón de exportación
+    col_exp1, col_exp2 = st.columns([1, 4])
+    with col_exp1:
+        if st.button("📥 Exportar a CSV"):
+            csv = df_alertas_detalle.to_csv(index=False)
+            st.download_button(
+                label="⬇️ Descargar",
+                data=csv,
+                file_name=f"alertas_cajero_{cod_cajero}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+else:
+    st.info("No hay alertas con los filtros seleccionados")
+
+# ============================================================================
+# FOOTER
+# ============================================================================
+
+st.markdown("---")
+st.markdown(f"""
+<div style='text-align: center; color: #666;'>
+    <p>Análisis generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+</div>
+""", unsafe_allow_html=True)
