@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Folders
+data
+parquet
+logs
+fraud_detection_historical
+models
+scripts
+sql
+
+# files
+config.yaml
+README.md
