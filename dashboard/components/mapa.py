@@ -55,7 +55,7 @@ def crear_mapa_alertas(df_alertas):
                 lon=df_sev['longitud'],
                 mode='markers',
                 marker=dict(
-                    size=10 if severidad == 'critico' else 8,
+                    size=14 if severidad == 'critico' else 20,
                     color=color_map[severidad],
                     opacity=0.8
                 ),

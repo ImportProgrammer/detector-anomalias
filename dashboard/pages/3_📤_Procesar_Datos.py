@@ -1,21 +1,22 @@
 """
-📤 Procesar Datos - Cargar archivos nuevos y detectar anomalías
+📤 Procesar Datos - Cargar archivos nuevos y detectar anomalías con ML
 """
 
 import streamlit as st
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
-import io
+import numpy as np
+import joblib
+import plotly.graph_objects as go
 
 # Agregar path del dashboard
 dashboard_path = Path(__file__).parent.parent
 sys.path.append(str(dashboard_path))
 
-from utils.db import execute_query, test_connection, get_engine
-import tempfile
-import os
+from utils.db import execute_query, test_connection
+from components.mapa import crear_mapa_alertas
 
 # ============================================================================
 # CONFIGURACIÓN DE PÁGINA
@@ -27,8 +28,49 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📤 Procesar Nuevos Datos")
-st.markdown("Cargue archivos de dispensación para detectar anomalías en tiempo real")
+st.title("📤 Procesar Nuevos Datos de Dispensación")
+st.markdown("Cargue archivos de dispensación ATM para detectar anomalías usando ML")
+
+# ============================================================================
+# CARGAR MODELO ML
+# ============================================================================
+
+@st.cache_resource
+def cargar_modelo():
+    """Cargar modelo de Isolation Forest entrenado"""
+    try:
+        model_path = Path(dashboard_path).parent / 'models' / 'isolation_forest_dispensacion_v2.pkl'
+        
+        if not model_path.exists():
+            st.error(f"❌ Modelo no encontrado en: {model_path}")
+            return None, None
+        
+        loaded_obj = joblib.load(model_path)
+
+        if isinstance(loaded_obj, dict):
+            model = loaded_obj['modelo']
+            feature_names = loaded_obj.get('feature_names', None)
+            
+            # st.success(f"✅ Modelo cargado: {model_path.name}")
+            st.success("✅ Modelo entrenado cargado.")
+            
+            # if 'metadata' in loaded_obj:
+            #     st.info(f"📊 Metadata: {loaded_obj['metadata']}")
+            if 'fecha_entrenamiento' in loaded_obj:
+                st.info(f"📅 Entrenado: {loaded_obj['fecha_entrenamiento']}")
+            
+            return model, feature_names
+        else:
+            # st.success(f"✅ Modelo cargado: {model_path.name}")
+            st.success("✅ Modelo entrenado cargado.")
+            return loaded_obj, None
+        
+    except Exception as e:
+        st.error(f"❌ Error al cargar modelo: {str(e)}")
+        return None, None
+
+# Cargar modelo al inicio
+modelo_ml, feature_names_modelo = cargar_modelo()
 
 # ============================================================================
 # VERIFICAR CONEXIÓN
@@ -39,48 +81,44 @@ if not test_connection():
     st.stop()
 
 # ============================================================================
-# INSTRUCCIONES
+# INFORMACIÓN DEL FORMATO
 # ============================================================================
 
-with st.expander("📖 Instrucciones de Uso", expanded=False):
-    st.markdown("""
-    ### Formato del archivo:
+# with st.expander("ℹ️ Información sobre el formato del archivo"):
+#     st.markdown("""
+#     ### Formato del Archivo de Dispensación
     
-    El archivo debe contener registros en el siguiente formato:
-    ```
-    01,YYYYMMDDHHMMSS,terminal_id
-    02,terminal_id,tipo_operacion,monto,timestamp,cantidad,campo1,campo2,...
-    ```
+#     **Línea 1 (Header):** Se ignora
+#     ```
+#     01,20251027094500,1000
+#     ```
     
-    **Tipos de registro:**
-    - `01`: Encabezado (fecha y terminal)
-    - `02`: Transacción de dispensación
+#     **Líneas de Transacciones:**
+#     ```
+#     02,115,2,7290000,20251027094500,7,20,143,50,0,100
+#     ```
     
-    **Tipos de operación:**
-    - `2`: Retiro
-    - `5`: Avance
-    - `8`: Otros
+#     **Estructura:**
+#     - Posición 0: `02` (tipo registro)
+#     - Posición 1: `115` (código cajero)
+#     - Posición 2: `2` (código operación: 2=Retiro, 3=Consulta, 4=Avance)
+#     - Posición 3: `7290000` (monto dispensado)
+#     - Posición 4: `20251027094500` (timestamp - final ventana 15min)
+#     - Posiciones 5+: Billetes (cantidad, denominación, ...)
     
-    ### Pasos:
-    1. Suba el archivo (CSV o TXT)
-    2. Revise la vista previa
-    3. Valide los datos
-    4. Procese para detectar anomalías
-    5. Revise los resultados
-    """)
-
-st.markdown("---")
+#     **Solo se procesan operaciones con código 2, 3 y 4**
+#     """)
 
 # ============================================================================
 # UPLOAD DE ARCHIVO
 # ============================================================================
 
-st.markdown("### 1️⃣ Cargar Archivo")
+st.markdown("### 1️⃣ Cargar Archivo de Dispensación")
 
 uploaded_file = st.file_uploader(
-    "Seleccione el archivo de dispensación",
-    type=['csv', 'txt'],
-    help="Archivos en formato CSV o TXT con el formato especificado"
+    "Seleccione el archivo de dispensación ATM",
+    type=['txt', 'csv'],
+    help="Archivos en formato TXT o CSV con estructura ATH"
 )
 
 if uploaded_file is None:
@@ -88,11 +126,374 @@ if uploaded_file is None:
     st.stop()
 
 # ============================================================================
+# FUNCIÓN DE FEATURE ENGINEERING
+# ============================================================================
+
+def calcular_features_ml(df_agregado, df_trans_original):
+    """Calcula features necesarias para el modelo ML"""
+    
+    df_features = df_agregado.copy()
+    
+    # Renombrar para coincidir con el modelo
+    df_features = df_features.rename(columns={
+        'monto_dispensado': 'monto_total_dispensado'
+    })
+    
+    # ========== FEATURES TEMPORALES ==========
+    df_features['hora_del_dia'] = df_features['bucket_15min'].dt.hour
+    df_features['dia_semana'] = df_features['bucket_15min'].dt.dayofweek
+    df_features['mes'] = df_features['bucket_15min'].dt.month
+    df_features['es_fin_de_semana'] = df_features['dia_semana'].isin([5, 6]).astype(int)
+    
+    # Fin de mes: últimos 3 días del mes
+    df_features['dia_mes'] = df_features['bucket_15min'].dt.day
+    df_features['dias_en_mes'] = df_features['bucket_15min'].dt.days_in_month
+    df_features['es_fin_de_mes'] = (df_features['dias_en_mes'] - df_features['dia_mes'] <= 3).astype(int)
+    
+    # Quincena: días 14-16 o 29-31
+    df_features['es_quincena'] = (
+        ((df_features['dia_mes'] >= 14) & (df_features['dia_mes'] <= 16)) |
+        (df_features['dia_mes'] >= 29)
+    ).astype(int)
+    
+    # ========== FEATURES DE DESVIACIÓN ==========
+    # Por cajero
+    stats_cajero = df_features.groupby('cod_cajero')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+    stats_cajero.columns = ['cod_cajero', 'cajero_mean', 'cajero_std']
+    df_features = df_features.merge(stats_cajero, on='cod_cajero', how='left')
+    df_features['z_score_vs_cajero'] = (
+        (df_features['monto_total_dispensado'] - df_features['cajero_mean']) / 
+        df_features['cajero_std'].replace(0, 1)
+    ).fillna(0)
+    
+    # Por hora del día
+    stats_hora = df_features.groupby('hora_del_dia')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+    stats_hora.columns = ['hora_del_dia', 'hora_mean', 'hora_std']
+    df_features = df_features.merge(stats_hora, on='hora_del_dia', how='left')
+    df_features['z_score_vs_hora'] = (
+        (df_features['monto_total_dispensado'] - df_features['hora_mean']) / 
+        df_features['hora_std'].replace(0, 1)
+    ).fillna(0)
+    
+    # Por día de semana
+    stats_dia = df_features.groupby('dia_semana')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+    stats_dia.columns = ['dia_semana', 'dia_mean', 'dia_std']
+    df_features = df_features.merge(stats_dia, on='dia_semana', how='left')
+    df_features['z_score_vs_dia_semana'] = (
+        (df_features['monto_total_dispensado'] - df_features['dia_mean']) / 
+        df_features['dia_std'].replace(0, 1)
+    ).fillna(0)
+    
+    # Percentil vs mes
+    df_features['percentil_vs_mes'] = df_features.groupby('mes')['monto_total_dispensado'].rank(pct=True)
+    
+    # ========== FEATURES DE TENDENCIA ==========
+    df_features = df_features.sort_values(['cod_cajero', 'bucket_15min'])
+    
+    # Cambio vs anterior (mismo cajero)
+    df_features['cambio_vs_anterior'] = df_features.groupby('cod_cajero')['monto_total_dispensado'].diff().fillna(0)
+    
+    # Cambio vs mismo momento ayer (96 períodos = 24h en ventanas de 15min)
+    df_features['cambio_vs_ayer'] = df_features.groupby('cod_cajero')['monto_total_dispensado'].diff(96).fillna(0)
+    
+    # Tendencia últimas 24h (promedio móvil)
+    df_features['tendencia_24h'] = (
+        df_features.groupby('cod_cajero')['monto_total_dispensado']
+        .transform(lambda x: x.rolling(window=96, min_periods=1).mean())
+    )
+    
+    # Volatilidad reciente (std últimas 24h)
+    df_features['volatilidad_reciente'] = (
+        df_features.groupby('cod_cajero')['monto_total_dispensado']
+        .transform(lambda x: x.rolling(window=96, min_periods=1).std())
+    ).fillna(0)
+    
+    # ========== LIMPIAR ==========
+    df_features = df_features.replace([np.inf, -np.inf], 0)
+    df_features = df_features.fillna(0)
+    
+    # Eliminar columnas auxiliares
+    cols_to_drop = ['cajero_mean', 'cajero_std', 'hora_mean', 'hora_std', 
+                    'dia_mean', 'dia_std', 'dia_mes', 'dias_en_mes']
+    df_features = df_features.drop(columns=[c for c in cols_to_drop if c in df_features.columns])
+    
+    return df_features
+
+def seleccionar_features_modelo(df_features):
+    """Selecciona las columnas necesarias para el modelo"""
+    
+    # Usar feature_names del modelo
+    if feature_names_modelo is not None:
+        features_modelo = feature_names_modelo
+    else:
+        # Fallback: lista manual de las 16 features
+        features_modelo = [
+            'monto_total_dispensado',
+            'num_transacciones',
+            'hora_del_dia',
+            'dia_semana',
+            'mes',
+            'es_fin_de_semana',
+            'es_fin_de_mes',
+            'es_quincena',
+            'z_score_vs_cajero',
+            'z_score_vs_hora',
+            'z_score_vs_dia_semana',
+            'percentil_vs_mes',
+            'cambio_vs_anterior',
+            'cambio_vs_ayer',
+            'tendencia_24h',
+            'volatilidad_reciente'
+        ]
+    
+    # Verificar
+    features_disponibles = [f for f in features_modelo if f in df_features.columns]
+    features_faltantes = [f for f in features_modelo if f not in df_features.columns]
+    
+    if features_faltantes:
+        st.error(f"❌ Features faltantes: {features_faltantes}")
+        return None, None
+    
+    return df_features[features_disponibles], features_disponibles
+
+def generar_razon_anomalia(row):
+    """Genera explicación de por qué es anómala"""
+    razones = []
+    
+    if row.get('z_score_vs_cajero', 0) > 3:
+        razones.append(f"Monto {row['z_score_vs_cajero']:.1f}σ sobre promedio del cajero")
+    
+    if row.get('z_score_vs_hora', 0) > 3:
+        razones.append(f"Inusual para esta hora del día")
+    
+    if row.get('es_fin_de_semana', 0) == 1 and row.get('monto_total_dispensado', 0) > 10000000:
+        razones.append("Monto alto en fin de semana")
+    
+    if row.get('num_transacciones', 0) > 15:
+        razones.append(f"Alta frecuencia: {row['num_transacciones']} tx en 15min")
+    
+    if not razones:
+        razones.append(f"Score de anomalía: {row.get('score_normalizado', 0):.1f}")
+    
+    return " | ".join(razones)
+
+def mostrar_tabla_anomalias(df_anomalias, key_suffix=""):
+    """Muestra tabla de anomalías con formato"""
+    
+    df_display = df_anomalias[[
+        'cod_cajero', 'bucket_15min', 'monto_total_dispensado', 
+        'num_transacciones', 'severidad', 'score_normalizado', 'razon'
+    ]].sort_values('score_normalizado', ascending=False)
+    
+    def resaltar_severidad(row):
+        if row['severidad'] == 'critico':
+            return ['background-color: #ffebee'] * len(row)
+        elif row['severidad'] == 'alto':
+            return ['background-color: #fff3e0'] * len(row)
+        elif row['severidad'] == 'medio':
+            return ['background-color: #e8f5e9'] * len(row)
+        return [''] * len(row)
+    
+    st.dataframe(
+        df_display.style.apply(resaltar_severidad, axis=1),
+        column_config={
+            'cod_cajero': 'Cajero',
+            'bucket_15min': st.column_config.DatetimeColumn('Fecha/Hora', format='DD/MM/YYYY HH:mm'),
+            'monto_total_dispensado': st.column_config.NumberColumn('Monto', format='$%.0f'),
+            'num_transacciones': 'Tx',
+            'severidad': 'Severidad',
+            'score_normalizado': st.column_config.NumberColumn('Score', format='%.1f'),
+            'razon': st.column_config.TextColumn('Razón', width='large')
+        },
+        hide_index=True,
+        height=400,
+        width='stretch'
+    )
+    
+    # Exportar
+    if st.button("📥 Exportar", key=f"export_{key_suffix}"):
+        csv = df_display.to_csv(index=False)
+        st.download_button(
+            "⬇️ Descargar CSV",
+            csv,
+            f"anomalias_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            "text/csv",
+            key=f"download_{key_suffix}"
+        )
+
+def mostrar_analisis_cajeros(df_anomalias, key_suffix=""):
+    """Muestra mapa, historial y análisis de cajeros con anomalías"""
+    
+    st.markdown("---")
+    st.markdown("#### 🗺️ Ubicación de Cajeros con Anomalías")
+    
+    # Obtener ubicaciones de los cajeros
+    cajeros_anomalos = df_anomalias['cod_cajero'].unique().tolist()
+    
+    query_ubicaciones = """
+    SELECT DISTINCT
+        cod_cajero,
+        latitud,
+        longitud,
+        municipio_dane,
+        departamento
+    FROM features_ml
+    WHERE cod_cajero = ANY(%s)
+      AND latitud IS NOT NULL
+      AND longitud IS NOT NULL
+    """
+    
+    df_ubicaciones = execute_query(query_ubicaciones, params=(cajeros_anomalos,))
+    
+    if not df_ubicaciones.empty:
+        # Agregar conteo de anomalías por cajero y severidad
+        conteo_anomalias = df_anomalias.groupby('cod_cajero').agg({
+            'severidad': lambda x: (x == 'critico').sum(),
+            'score_normalizado': 'max'
+        }).reset_index()
+        conteo_anomalias.columns = ['cod_cajero', 'num_criticas', 'max_score']
+        
+        df_ubicaciones = df_ubicaciones.merge(conteo_anomalias, on='cod_cajero', how='left')
+        
+        # Determinar severidad del cajero
+        df_ubicaciones['severidad'] = df_ubicaciones['num_criticas'].apply(
+            lambda x: 'critico' if x > 0 else 'alto'
+        )
+        
+        df_ubicaciones['score_anomalia'] = df_ubicaciones['max_score']
+        df_ubicaciones['monto_dispensado'] = 0
+        
+        # Crear descripción para hover
+        df_ubicaciones['descripcion'] = df_ubicaciones.apply(
+            lambda row: f"Cajero {row['cod_cajero']} | {int(row['num_criticas'])} críticas | Score: {row['max_score']:.1f}",
+            axis=1
+        )
+        
+        # Crear mapa
+        fig_mapa = crear_mapa_alertas(df_ubicaciones)
+        
+        if fig_mapa:
+            st.plotly_chart(fig_mapa, config={'displayModeBar': False})
+            st.caption(f"🔴 Rojo = Cajeros con anomalías críticas | 🟠 Naranja = Cajeros con anomalías altas/medias")
+        else:
+            st.warning("No se pudo crear el mapa")
+    else:
+        st.info("No hay coordenadas disponibles para los cajeros")
+    
+    # ========== HISTORIAL DE ALERTAS ==========
+    st.markdown("---")
+    st.markdown("#### 📈 Historial de Alertas Acumuladas.")
+    
+    # Query para obtener historial
+    query_historial = """
+    SELECT 
+        cod_cajero,
+        DATE(fecha_hora) as fecha,
+        COUNT(*) FILTER (WHERE severidad = 'critico') as criticas,
+        COUNT(*) FILTER (WHERE severidad = 'alto') as altas,
+        COUNT(*) FILTER (WHERE severidad = 'medio') as medias
+    FROM alertas_dispensacion
+    WHERE cod_cajero = ANY(%s)
+      --AND fecha_hora >= NOW() - INTERVAL '30 days'
+    GROUP BY cod_cajero, DATE(fecha_hora)
+    ORDER BY fecha ASC
+    """
+    
+    df_historial = execute_query(query_historial, params=(cajeros_anomalos,))
+    
+    if not df_historial.empty:
+        # Crear gráfico acumulado por cajero
+        fig_historial = go.Figure()
+        
+        # Limitar a top 10 cajeros con más críticas para legibilidad
+        top_cajeros = df_historial.groupby('cod_cajero')['criticas'].sum().nlargest(10).index.tolist()
+        
+        for cajero in top_cajeros:
+            df_cajero = df_historial[df_historial['cod_cajero'] == cajero].copy()
+            
+            if not df_cajero.empty:
+                # Acumular alertas críticas
+                df_cajero = df_cajero.sort_values('fecha')
+                df_cajero['criticas_acumuladas'] = df_cajero['criticas'].cumsum()
+                
+                fig_historial.add_trace(go.Scatter(
+                    x=df_cajero['fecha'],
+                    y=df_cajero['criticas_acumuladas'],
+                    mode='lines+markers',
+                    name=f'Cajero {cajero}',
+                    hovertemplate='<b>Cajero %{fullData.name}</b><br>' +
+                                  'Fecha: %{x|%d/%m/%Y}<br>' +
+                                  'Acumuladas: %{y}<br>' +
+                                  '<extra></extra>'
+                ))
+        
+        fig_historial.update_layout(
+            title='Alertas Críticas Acumuladas por Cajero',
+            xaxis_title='Fecha',
+            yaxis_title='Alertas Críticas Acumuladas',
+            height=450,
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            plot_bgcolor='white',
+            xaxis=dict(gridcolor='lightgray'),
+            yaxis=dict(gridcolor='lightgray')
+        )
+        
+        st.plotly_chart(fig_historial, config={'displayModeBar': False})
+        
+        # Tabla resumen por cajero
+        st.markdown("##### 📊 Resumen Histórico por Cajero")
+        
+        resumen_cajeros = df_historial.groupby('cod_cajero').agg({
+            'criticas': 'sum',
+            'altas': 'sum',
+            'medias': 'sum'
+        }).reset_index()
+        resumen_cajeros['total'] = (
+            resumen_cajeros['criticas'] + 
+            resumen_cajeros['altas'] + 
+            resumen_cajeros['medias']
+        )
+        resumen_cajeros = resumen_cajeros.sort_values('criticas', ascending=False)
+        
+        col_tabla, col_metricas = st.columns([3, 1])
+        
+        with col_tabla:
+            st.dataframe(
+                resumen_cajeros,
+                column_config={
+                    'cod_cajero': 'Cajero',
+                    'criticas': st.column_config.NumberColumn('🔴 Críticas', format='%d'),
+                    'altas': st.column_config.NumberColumn('🟠 Altas', format='%d'),
+                    'medias': st.column_config.NumberColumn('🟡 Medias', format='%d'),
+                    'total': st.column_config.NumberColumn('📊 Total', format='%d')
+                },
+                hide_index=True,
+                width='stretch',
+                height=300
+            )
+        
+        with col_metricas:
+            st.metric("📍 Cajeros analizados", len(cajeros_anomalos))
+            st.metric("🔴 Total críticas", resumen_cajeros['criticas'].sum())
+            st.metric("📊 Total alertas", resumen_cajeros['total'].sum())
+    else:
+        st.info("ℹ️ No hay historial previo en la base de datos para estos cajeros")
+        st.caption("💡 Las alertas se registran cuando se procesa el pipeline completo de detección")
+
+# ============================================================================
 # PROCESAMIENTO DEL ARCHIVO
 # ============================================================================
 
 st.markdown("---")
-st.markdown("### 2️⃣ Vista Previa de Datos")
+st.markdown("### 2️⃣ Análisis del Archivo")
 
 try:
     # Leer archivo
@@ -100,286 +501,376 @@ try:
     lines = content.strip().split('\n')
     
     st.success(f"✅ Archivo cargado: {uploaded_file.name}")
-    st.info(f"📊 Total de líneas: {len(lines):,}")
     
     # Parsear archivo
-    encabezados = []
+    header_info = None
     transacciones = []
     
-    for line in lines:
+    codigos_operacion = {
+        '2': 'Retiro',
+        '3': 'Consulta',
+        '4': 'Avance',
+        '5': 'Avance',
+        '8': 'Otros'
+    }
+    
+    codigos_procesar = {'2', '3', '4'}
+    
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+            
         parts = line.split(',')
         tipo_registro = parts[0]
         
         if tipo_registro == '01':
-            # Encabezado
-            fecha_hora = parts[1]
-            terminal = parts[2]
-            encabezados.append({
-                'fecha_hora': fecha_hora,
-                'terminal': terminal
-            })
+            try:
+                header_info = {
+                    'fecha_hora': datetime.strptime(parts[1], '%Y%m%d%H%M%S'),
+                    'identificador': parts[2] if len(parts) > 2 else 'N/A'
+                }
+            except:
+                pass
+                
         elif tipo_registro == '02':
-            # Transacción
-            transaccion = {
-                'terminal': parts[1],
-                'tipo_operacion': parts[2],
-                'monto': int(parts[3]) if parts[3] else 0,
-                'timestamp': parts[4],
-                'cantidad': int(parts[5]) if parts[5] else 0
-            }
-            transacciones.append(transaccion)
+            try:
+                cod_cajero = parts[1]
+                cod_operacion = parts[2]
+                
+                if cod_operacion not in codigos_procesar:
+                    continue
+                
+                monto = int(parts[3]) if parts[3] else 0
+                timestamp_str = parts[4]
+                
+                try:
+                    timestamp = datetime.strptime(timestamp_str, '%Y%m%d%H%M%S')
+                except:
+                    continue
+                
+                transaccion = {
+                    'cod_cajero': cod_cajero,
+                    'cod_operacion': cod_operacion,
+                    'tipo_operacion': codigos_operacion.get(cod_operacion, 'Desconocido'),
+                    'monto_dispensado': monto,
+                    'timestamp': timestamp
+                }
+                
+                transacciones.append(transaccion)
+                
+            except:
+                continue
     
-    # Crear DataFrame
-    df_transacciones = pd.DataFrame(transacciones)
-    
-    if df_transacciones.empty:
-        st.error("❌ No se encontraron transacciones válidas en el archivo")
+    if not transacciones:
+        st.error("❌ No se encontraron transacciones válidas")
         st.stop()
     
-    # Convertir timestamp
-    df_transacciones['timestamp'] = pd.to_datetime(
-        df_transacciones['timestamp'],
-        format='%Y%m%d%H%M%S'
-    )
+    df_trans = pd.DataFrame(transacciones)
     
-    # Mapear tipos de operación
-    tipo_op_map = {
-        '2': 'Retiro',
-        '5': 'Avance',
-        '8': 'Otros'
-    }
-    df_transacciones['tipo_operacion_nombre'] = df_transacciones['tipo_operacion'].map(tipo_op_map)
-    
-    # Mostrar estadísticas
+    # Métricas
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("📊 Transacciones", f"{len(df_transacciones):,}")
+        st.metric("📊 Transacciones", f"{len(df_trans):,}")
     
     with col2:
-        terminales_unicos = df_transacciones['terminal'].nunique()
-        st.metric("🏧 Cajeros", f"{terminales_unicos:,}")
+        cajeros_unicos = df_trans['cod_cajero'].nunique()
+        st.metric("🏧 Cajeros", f"{cajeros_unicos:,}")
     
     with col3:
-        monto_total = df_transacciones['monto'].sum()
+        monto_total = df_trans['monto_dispensado'].sum()
         st.metric("💰 Monto Total", f"${monto_total:,.0f}")
     
     with col4:
-        fecha_min = df_transacciones['timestamp'].min()
-        fecha_max = df_transacciones['timestamp'].max()
-        st.metric("📅 Período", f"{(fecha_max - fecha_min).days} días")
-    
-    # Mostrar vista previa
-    st.markdown("#### Vista Previa (primeras 100 transacciones)")
-    st.dataframe(
-        df_transacciones.head(100),
-        use_container_width=True,
-        column_config={
-            'terminal': 'Terminal',
-            'tipo_operacion': 'Tipo Op.',
-            'tipo_operacion_nombre': 'Operación',
-            'monto': st.column_config.NumberColumn('Monto', format='$%,.0f'),
-            'timestamp': st.column_config.DatetimeColumn('Fecha/Hora', format='DD/MM/YYYY HH:mm'),
-            'cantidad': 'Cantidad'
-        }
-    )
-    
+        if header_info:
+            st.metric("📅 Reporte", header_info['fecha_hora'].strftime('%Y-%m-%d %H:%M'))
+
 except Exception as e:
-    st.error(f"❌ Error al procesar el archivo: {str(e)}")
+    st.error(f"❌ Error al procesar archivo: {str(e)}")
+    st.exception(e)
     st.stop()
 
 st.markdown("---")
 
 # ============================================================================
-# VALIDACIÓN
+# AGREGACIÓN Y FEATURE ENGINEERING
 # ============================================================================
 
-st.markdown("### 3️⃣ Validación de Datos")
+st.markdown("### 3️⃣ Preparación de Datos para ML")
 
-validaciones = []
-
-# Validar que hay datos
-if len(df_transacciones) > 0:
-    validaciones.append(("✅", "Archivo contiene transacciones", "success"))
-else:
-    validaciones.append(("❌", "Archivo sin transacciones", "error"))
-
-# Validar columnas requeridas
-columnas_requeridas = ['terminal', 'tipo_operacion', 'monto', 'timestamp']
-columnas_presentes = all(col in df_transacciones.columns for col in columnas_requeridas)
-if columnas_presentes:
-    validaciones.append(("✅", "Todas las columnas requeridas están presentes", "success"))
-else:
-    validaciones.append(("❌", "Faltan columnas requeridas", "error"))
-
-# Validar fechas
-try:
-    pd.to_datetime(df_transacciones['timestamp'])
-    validaciones.append(("✅", "Formato de fechas válido", "success"))
-except:
-    validaciones.append(("❌", "Formato de fechas inválido", "error"))
-
-# Validar montos
-if df_transacciones['monto'].notna().all():
-    validaciones.append(("✅", "Todos los montos son válidos", "success"))
-else:
-    validaciones.append(("⚠️", "Algunos montos tienen valores nulos", "warning"))
-
-# Mostrar validaciones
-for icono, mensaje, tipo in validaciones:
-    if tipo == "success":
-        st.success(f"{icono} {mensaje}")
-    elif tipo == "error":
-        st.error(f"{icono} {mensaje}")
-    elif tipo == "warning":
-        st.warning(f"{icono} {mensaje}")
-
-# Verificar si hay errores críticos
-hay_errores = any(v[2] == "error" for v in validaciones)
-
-if hay_errores:
-    st.error("⚠️ No se puede procesar el archivo debido a errores de validación")
-    st.stop()
+with st.spinner("🔄 Calculando features..."):
+    
+    # Crear bucket de 15 minutos
+    df_trans['bucket_15min'] = df_trans['timestamp'].dt.floor('15min')
+    
+    # Agregar por cajero y ventana
+    df_agregado = df_trans.groupby(['cod_cajero', 'bucket_15min']).agg({
+        'monto_dispensado': 'sum',
+        'timestamp': 'count'
+    }).reset_index()
+    
+    df_agregado.columns = ['cod_cajero', 'bucket_15min', 'monto_dispensado', 'num_transacciones']
+    
+    st.info(f"📦 {len(df_agregado):,} ventanas de 15 minutos agregadas")
+    
+    # Calcular features para ML
+    df_features = calcular_features_ml(df_agregado, df_trans)
+    
+    st.success(f"✅ Features calculadas: {len(df_features.columns)} columnas")
+    
+    # Mostrar algunas features
+    with st.expander("🔍 Ver Features Calculadas"):
+        st.write("**Primeras 5 filas con features:**")
+        st.dataframe(df_features.head())
 
 st.markdown("---")
 
 # ============================================================================
-# PROCESAMIENTO Y DETECCIÓN
+# TABS: PRODUCCIÓN vs DEMO
 # ============================================================================
 
-st.markdown("### 4️⃣ Procesamiento y Detección")
+st.markdown("### 4️⃣ Detección de Anomalías con Machine Learning")
 
-st.info("""
-**Nota:** El procesamiento completo incluye:
-1. Agregación de datos en ventanas de 15 minutos
-2. Cálculo de features temporales
-3. Aplicación del modelo de Machine Learning
-4. Generación de alertas por anomalías detectadas
+tab1, tab2 = st.tabs(["🔬 Modo Producción", "🎯 Modo Demo"])
 
-Este proceso puede tomar varios minutos dependiendo del tamaño del archivo.
-""")
+# ============================================================================
+# TAB 1: MODO PRODUCCIÓN
+# ============================================================================
 
-col_proc1, col_proc2 = st.columns([1, 4])
-
-with col_proc1:
-    procesar = st.button(
-        "🚀 Procesar y Detectar",
-        type="primary",
-        use_container_width=True,
-        disabled=hay_errores
-    )
-
-if procesar:
-    with st.spinner("🔄 Procesando datos..."):
-        try:
-            # Paso 1: Agregar por ventanas de 15 minutos
-            st.write("📊 Paso 1/4: Agregando datos por ventanas de 15 minutos...")
-            
-            df_transacciones['bucket_15min'] = df_transacciones['timestamp'].dt.floor('15min')
-            
-            df_agregado = df_transacciones.groupby(['terminal', 'bucket_15min']).agg({
-                'monto': 'sum',
-                'cantidad': 'sum'
-            }).reset_columns()
-            
-            df_agregado.columns = ['cod_terminal', 'bucket_15min', 'monto_total_dispensado', 'num_transacciones']
-            
-            progress_bar = st.progress(25)
-            
-            # Paso 2: Simular cálculo de features (en producción llamaría al script real)
-            st.write("🔧 Paso 2/4: Calculando features temporales...")
-            progress_bar.progress(50)
-            
-            # Paso 3: Simular aplicación del modelo
-            st.write("🤖 Paso 3/4: Aplicando modelo de Machine Learning...")
-            progress_bar.progress(75)
-            
-            # Simulación: detectar "anomalías" (montos muy altos)
-            umbral_alto = df_agregado['monto_total_dispensado'].quantile(0.95)
-            df_agregado['es_anomalia'] = df_agregado['monto_total_dispensado'] > umbral_alto
-            
-            anomalias_detectadas = df_agregado['es_anomalia'].sum()
-            
-            # Paso 4: Generar reporte
-            st.write("📝 Paso 4/4: Generando reporte de alertas...")
-            progress_bar.progress(100)
-            
-            st.markdown("---")
-            st.markdown("### 5️⃣ Resultados")
-            
-            st.success(f"✅ Procesamiento completado exitosamente!")
-            
-            # Mostrar resultados
-            col_res1, col_res2, col_res3 = st.columns(3)
-            
-            with col_res1:
-                st.metric(
-                    "📊 Ventanas Procesadas",
-                    f"{len(df_agregado):,}",
-                    help="Número de ventanas de 15 minutos analizadas"
-                )
-            
-            with col_res2:
-                st.metric(
-                    "🚨 Anomalías Detectadas",
-                    f"{anomalias_detectadas:,}",
-                    delta=f"{(anomalias_detectadas/len(df_agregado)*100):.1f}%",
-                    help="Ventanas con comportamiento anómalo"
-                )
-            
-            with col_res3:
-                terminales_afectados = df_agregado[df_agregado['es_anomalia']]['cod_terminal'].nunique()
-                st.metric(
-                    "🏧 Cajeros Afectados",
-                    f"{terminales_afectados:,}",
-                    help="Cajeros con al menos una anomalía"
-                )
-            
-            # Mostrar alertas detectadas
-            if anomalias_detectadas > 0:
-                st.markdown("#### 🚨 Alertas Detectadas")
+with tab1:
+    st.info("""
+    **Modo Producción:** Usa el umbral del modelo entrenado (`contamination=0.01`).
+    Solo detecta anomalías que superan este umbral estricto.
+    """)
+    
+    if modelo_ml is None:
+        st.error("❌ Modelo no disponible")
+        st.stop()
+    
+    col_det1, col_det2 = st.columns([1, 4])
+    
+    with col_det1:
+        detectar_prod = st.button(
+            "🤖 Detectar",
+            type="primary",
+            width='stretch',
+            key="detectar_prod"
+        )
+    
+    if detectar_prod:
+        with st.spinner("🤖 Aplicando modelo ML..."):
+            try:
+                # Seleccionar features
+                X_predict, features_usadas = seleccionar_features_modelo(df_features)
                 
-                df_alertas = df_agregado[df_agregado['es_anomalia']].copy()
-                df_alertas = df_alertas.sort_values('monto_total_dispensado', ascending=False)
+                if X_predict is None:
+                    st.stop()
                 
-                st.dataframe(
-                    df_alertas,
-                    use_container_width=True,
-                    column_config={
-                        'cod_terminal': 'Cajero',
-                        'bucket_15min': st.column_config.DatetimeColumn('Fecha/Hora', format='DD/MM/YYYY HH:mm'),
-                        'monto_total_dispensado': st.column_config.NumberColumn('Monto', format='$%,.0f'),
-                        'num_transacciones': 'Transacciones',
-                        'es_anomalia': None
-                    },
-                    hide_index=True
+                st.info(f"📊 Usando {len(features_usadas)} features")
+                
+                # Normalizar con scaler del modelo
+                loaded_obj = joblib.load(Path(dashboard_path).parent / 'models' / 'isolation_forest_dispensacion_v2.pkl')
+                if 'scaler' in loaded_obj:
+                    scaler = loaded_obj['scaler']
+                    X_scaled = scaler.transform(X_predict)
+                else:
+                    X_scaled = X_predict
+                
+                # Predicciones
+                predictions = modelo_ml.predict(X_scaled)
+                scores = modelo_ml.score_samples(X_scaled)
+                
+                # Agregar a DataFrame
+                df_features['prediccion'] = predictions
+                df_features['score_anomalia'] = scores
+                df_features['es_anomalia'] = predictions == -1
+                
+                # Normalizar scores
+                min_score = scores.min()
+                max_score = scores.max()
+                df_features['score_normalizado'] = (
+                    ((scores - min_score) / (max_score - min_score)) * 100
+                ).round(1)
+                df_features['score_normalizado'] = 100 - df_features['score_normalizado']
+                
+                # Clasificar severidad
+                def clasificar_severidad(row):
+                    if row['es_anomalia']:
+                        if row['score_normalizado'] >= 90:
+                            return 'critico'
+                        elif row['score_normalizado'] >= 75:
+                            return 'alto'
+                        else:
+                            return 'medio'
+                    return 'normal'
+                
+                df_features['severidad'] = df_features.apply(clasificar_severidad, axis=1)
+                df_features['razon'] = df_features.apply(generar_razon_anomalia, axis=1)
+                
+                # Resultados
+                anomalias_detectadas = df_features['es_anomalia'].sum()
+                
+                st.success("✅ Detección completada")
+                
+                # Métricas
+                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                
+                with col_m1:
+                    criticas = (df_features['severidad'] == 'critico').sum()
+                    st.metric("🔴 Críticas", f"{criticas:,}")
+                
+                with col_m2:
+                    altas = (df_features['severidad'] == 'alto').sum()
+                    st.metric("🟠 Altas", f"{altas:,}")
+                
+                with col_m3:
+                    medias = (df_features['severidad'] == 'medio').sum()
+                    st.metric("🟡 Medias", f"{medias:,}")
+                
+                with col_m4:
+                    pct = (anomalias_detectadas / len(df_features) * 100) if len(df_features) > 0 else 0
+                    st.metric("🚨 Total", f"{anomalias_detectadas:,}", f"{pct:.2f}%")
+                
+                # Mostrar tabla si hay anomalías
+                if anomalias_detectadas > 0:
+                    st.markdown("#### 🚨 Anomalías Detectadas")
+                    
+                    df_anomalias = df_features[df_features['es_anomalia']].copy()
+                    mostrar_tabla_anomalias(df_anomalias, key_suffix="prod")
+                    
+                    # Mostrar análisis adicional
+                    mostrar_analisis_cajeros(df_anomalias, key_suffix="prod")
+                else:
+                    st.info("✅ No se detectaron anomalías con el umbral de producción")
+                    st.caption("💡 Prueba el Modo Demo para ver las ventanas más sospechosas")
+                
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                st.exception(e)
+
+# ============================================================================
+# TAB 2: MODO DEMO
+# ============================================================================
+
+with tab2:
+    st.info("""
+    **Modo Demo:** Muestra las ventanas más sospechosas aunque no superen el umbral.
+    Útil para demostraciones y análisis exploratorio.
+    """)
+    
+    if modelo_ml is None:
+        st.error("❌ Modelo no disponible")
+        st.stop()
+    
+    # Control de sensibilidad
+    col_sens1, col_sens2 = st.columns([2, 1])
+    
+    with col_sens1:
+        percentil_demo = st.slider(
+            "Sensibilidad de detección",
+            min_value=1,
+            max_value=5,
+            value=2,
+            help="% de ventanas más sospechosas a marcar"
+        )
+    
+    with col_sens2:
+        st.metric("Ventanas a revisar", f"~{int(len(df_features) * percentil_demo / 100):,}")
+    
+    col_det_demo1, col_det_demo2 = st.columns([1, 4])
+    
+    with col_det_demo1:
+        detectar_demo = st.button(
+            "🎯 Detectar Demo",
+            type="primary",
+            width='stretch',
+            key="detectar_demo"
+        )
+    
+    if detectar_demo:
+        with st.spinner("🎯 Aplicando detección demo..."):
+            try:
+                # Seleccionar features
+                X_predict, features_usadas = seleccionar_features_modelo(df_features)
+                
+                if X_predict is None:
+                    st.stop()
+                
+                # Normalizar
+                loaded_obj = joblib.load(Path(dashboard_path).parent / 'models' / 'isolation_forest_dispensacion_v2.pkl')
+                if 'scaler' in loaded_obj:
+                    X_scaled = loaded_obj['scaler'].transform(X_predict)
+                else:
+                    X_scaled = X_predict
+                
+                # Scores
+                scores = modelo_ml.score_samples(X_scaled)
+                
+                df_features['score_anomalia'] = scores
+                
+                # Normalizar scores
+                min_score = scores.min()
+                max_score = scores.max()
+                df_features['score_normalizado'] = (
+                    100 - ((scores - min_score) / (max_score - min_score)) * 100
+                ).round(1)
+                
+                # Marcar top N% como sospechosas
+                n_sospechosas = max(1, int(len(df_features) * percentil_demo / 100))
+                df_sorted = df_features.nlargest(n_sospechosas, 'score_normalizado')
+                
+                df_features['es_anomalia'] = False
+                df_features.loc[df_sorted.index, 'es_anomalia'] = True
+                
+                # Clasificar severidad
+                def clasificar_demo(score):
+                    if score >= 90:
+                        return 'critico'
+                    elif score >= 75:
+                        return 'alto'
+                    else:
+                        return 'medio'
+                
+                df_features['severidad'] = 'normal'
+                df_features.loc[df_features['es_anomalia'], 'severidad'] = (
+                    df_features.loc[df_features['es_anomalia'], 'score_normalizado'].apply(clasificar_demo)
                 )
                 
-                # Botón de exportación
-                if st.button("📥 Exportar Alertas"):
-                    csv = df_alertas.to_csv(index=False)
-                    st.download_button(
-                        label="⬇️ Descargar CSV",
-                        data=csv,
-                        file_name=f"alertas_nuevas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-            else:
-                st.info("ℹ️ No se detectaron anomalías en este archivo")
-            
-            st.markdown("---")
-            
-            st.success("""
-            ✅ **Próximos pasos:**
-            - Las alertas han sido procesadas
-            - En producción, estas alertas se insertarían en la base de datos
-            - El dashboard se actualizaría automáticamente
-            - Se enviarían notificaciones a los responsables
-            """)
-            
-        except Exception as e:
-            st.error(f"❌ Error durante el procesamiento: {str(e)}")
-            st.exception(e)
+                # Generar razones
+                df_features['razon'] = df_features.apply(generar_razon_anomalia, axis=1)
+                
+                # Resultados
+                st.success("✅ Detección demo completada")
+                
+                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                
+                with col_m1:
+                    criticas = (df_features['severidad'] == 'critico').sum()
+                    st.metric("🔴 Críticas", f"{criticas:,}")
+                
+                with col_m2:
+                    altas = (df_features['severidad'] == 'alto').sum()
+                    st.metric("🟠 Altas", f"{altas:,}")
+                
+                with col_m3:
+                    medias = (df_features['severidad'] == 'medio').sum()
+                    st.metric("🟡 Medias", f"{medias:,}")
+                
+                with col_m4:
+                    st.metric("🎯 Sospechosas", f"{n_sospechosas:,}")
+                
+                # Tabla
+                st.markdown("#### 🎯 Ventanas Más Sospechosas")
+                
+                df_sospechosas = df_features[df_features['es_anomalia']].copy()
+                mostrar_tabla_anomalias(df_sospechosas, key_suffix="demo")
+                
+                # Mostrar análisis adicional
+                mostrar_analisis_cajeros(df_sospechosas, key_suffix="demo")
+                
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                st.exception(e)
 
 # ============================================================================
 # FOOTER
@@ -388,7 +879,7 @@ if procesar:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p><strong>Nota:</strong> Esta es una versión de demostración.</p>
-    <p>En producción, el procesamiento se integraría con los scripts de detección completos.</p>
+    <p><strong>Sistema de Detección de Fraudes ATM</strong></p>
+    <p>Usando Machine Learning (Isolation Forest)</p>
 </div>
 """, unsafe_allow_html=True)

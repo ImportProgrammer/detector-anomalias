@@ -13,8 +13,8 @@ dashboard_path = Path(__file__).parent.parent
 sys.path.append(str(dashboard_path))
 
 from utils.db import execute_query, test_connection
-from components.kpis import mostrar_kpis_cajero
-from components.graficos import crear_grafico_tendencia_temporal, crear_grafico_comparacion_montos
+# from components.kpis import mostrar_kpis_cajero  # TODO: Implementar esta función
+from components.graficos import crear_grafico_tendencia_temporal
 from components.mapa import crear_mapa_alertas
 
 # ============================================================================
@@ -69,7 +69,7 @@ with col1:
 
 with col2:
     st.markdown("<br>", unsafe_allow_html=True)
-    buscar = st.button("🔍 Analizar", use_container_width=True, type="primary")
+    buscar = st.button("🔍 Analizar", width='stretch', type="primary")
 
 if not buscar and 'ultimo_cajero' not in st.session_state:
     st.info("👆 Seleccione un cajero y presione 'Analizar' para ver el análisis detallado")
@@ -126,58 +126,67 @@ WHERE cod_cajero = %s
 df_count = execute_query(query_alertas_cajero, params=(cod_cajero,))
 num_alertas = int(df_count.iloc[0]['total_alertas']) if not df_count.empty else 0
 
-# Mostrar KPIs del cajero
-mostrar_kpis_cajero(info_cajero, num_alertas)
+# Mostrar KPIs del cajero (inline temporal hasta crear componente)
+st.markdown("### 📊 Indicadores del Cajero")
+
+col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+
+with col_kpi1:
+    st.metric(
+        "🚨 Total Alertas",
+        f"{num_alertas:,}",
+        help="Número total de alertas generadas"
+    )
+
+with col_kpi2:
+    dispensacion_prom = info_cajero.get('dispensacion_promedio', 0)
+    st.metric(
+        "💰 Dispensación Promedio",
+        f"${dispensacion_prom:,.0f}" if dispensacion_prom else "N/A",
+        help="Monto promedio dispensado"
+    )
+
+with col_kpi3:
+    coef_var = info_cajero.get('coef_variacion', 0)
+    st.metric(
+        "📊 Coef. Variación",
+        f"{coef_var:.2f}" if coef_var else "N/A",
+        help="Coeficiente de variación (std/mean)"
+    )
+
+with col_kpi4:
+    pct_anomalias = info_cajero.get('pct_anomalias_3std', 0)
+    st.metric(
+        "⚠️ % Anomalías",
+        f"{pct_anomalias:.1f}%" if pct_anomalias else "N/A",
+        help="Porcentaje de dispensaciones anómalas (>3σ)"
+    )
 
 st.markdown("---")
 
-# ============================================================================
-# INFORMACIÓN GEOGRÁFICA
-# ============================================================================
+# # ============================================================================
+# # INFORMACIÓN GEOGRÁFICA
+# # ============================================================================
 
-col_info, col_mapa = st.columns([2, 1])
+# st.markdown("### 📍 Información de Ubicación")
 
-with col_info:
-    st.markdown("### 📍 Información de Ubicación")
-    
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.metric("🗺️ Departamento", info_cajero.get('departamento', 'N/A'))
-    with col_b:
-        st.metric("📍 Municipio", info_cajero.get('municipio_dane', 'N/A'))
-    
-    col_c, col_d = st.columns(2)
-    with col_c:
-        lat = info_cajero.get('latitud')
-        st.metric("🌐 Latitud", f"{lat:.6f}" if lat else "N/A")
-    with col_d:
-        lon = info_cajero.get('longitud')
-        st.metric("🌐 Longitud", f"{lon:.6f}" if lon else "N/A")
+# col_a, col_b, col_c, col_d = st.columns(4)
 
-with col_mapa:
-    st.markdown("### 🗺️ Ubicación en Mapa")
-    
-    if info_cajero.get('latitud') and info_cajero.get('longitud'):
-        # Crear DataFrame para el mapa (solo este cajero)
-        df_mapa_cajero = pd.DataFrame([{
-            'cod_cajero': cod_cajero,
-            'latitud': info_cajero['latitud'],
-            'longitud': info_cajero['longitud'],
-            'severidad': 'critico',
-            'score_anomalia': 100,
-            'monto_dispensado': info_cajero['dispensacion_promedio'],
-            'descripcion': f"Cajero {cod_cajero}",
-            'municipio_dane': info_cajero.get('municipio_dane', 'N/A'),
-            'departamento': info_cajero.get('departamento', 'N/A')
-        }])
-        
-        fig_mapa = crear_mapa_alertas(df_mapa_cajero)
-        if fig_mapa:
-            st.plotly_chart(fig_mapa, use_container_width=True, config={'displayModeBar': False})
-    else:
-        st.info("Sin coordenadas disponibles")
+# with col_a:
+#     st.metric("🗺️ Departamento", info_cajero.get('departamento', 'N/A'))
 
-st.markdown("---")
+# with col_b:
+#     st.metric("📍 Municipio", info_cajero.get('municipio_dane', 'N/A'))
+
+# with col_c:
+#     lat = info_cajero.get('latitud')
+#     st.metric("🌐 Latitud", f"{lat:.6f}" if lat else "N/A")
+
+# with col_d:
+#     lon = info_cajero.get('longitud')
+#     st.metric("🌐 Longitud", f"{lon:.6f}" if lon else "N/A")
+
+# st.markdown("---")
 
 # ============================================================================
 # TIMELINE DE ALERTAS
@@ -229,7 +238,7 @@ df_timeline = execute_query(
 if not df_timeline.empty:
     fig_timeline = crear_grafico_tendencia_temporal(df_timeline)
     if fig_timeline:
-        st.plotly_chart(fig_timeline, use_container_width=True, config={'displayModeBar': True})
+        st.plotly_chart(fig_timeline, config={'displayModeBar': True})
 else:
     st.info("No hay alertas en el período seleccionado")
 
@@ -271,33 +280,142 @@ if not df_comparacion.empty:
     
     df_comparacion_full = pd.concat([cajero_actual, df_comparacion], ignore_index=True)
     
-    # Gráfico de comparación
+    # MEJORA 1: Ordenar por num_alertas para mejor visualización
+    df_comparacion_full = df_comparacion_full.sort_values('num_alertas', ascending=True)
+    
+    # MEJORA 2: Crear etiquetas categóricas explícitas
+    df_comparacion_full['cajero_label'] = 'Cajero ' + df_comparacion_full['cod_cajero'].astype(str)
+    
+    # MEJORA 3: Identificar el cajero actual
+    df_comparacion_full['es_actual'] = df_comparacion_full['cod_cajero'] == cod_cajero
+    
+    # Gráfico de comparación mejorado
     import plotly.graph_objects as go
+    
+    # Crear colores personalizados
+    colors = ['#ef4444' if es_actual else '#60a5fa' 
+              for es_actual in df_comparacion_full['es_actual']]
     
     fig_comp = go.Figure()
     
-    # Destacar el cajero actual
-    colors = ['red' if c == cod_cajero else 'lightblue' for c in df_comparacion_full['cod_cajero']]
-    
     fig_comp.add_trace(go.Bar(
-        x=df_comparacion_full['cod_cajero'].astype(str),
-        y=df_comparacion_full['num_alertas'],
+        x=df_comparacion_full['num_alertas'],
+        y=df_comparacion_full['cajero_label'],
+        orientation='h',  # Horizontal es mejor para muchos cajeros
         marker_color=colors,
         text=df_comparacion_full['num_alertas'],
-        textposition='outside'
+        textposition='outside',
+        textfont=dict(size=12),
+        hovertemplate='<b>%{y}</b><br>' +
+                      'Alertas: %{x}<br>' +
+                      'Score Promedio: %{customdata:.1f}<br>' +
+                      '<extra></extra>',
+        customdata=df_comparacion_full['score_promedio']
     ))
     
     fig_comp.update_layout(
-        title=f'Comparación con Cajeros en {info_cajero.get("municipio_dane", "la misma zona")}',
-        xaxis_title='Cajero',
-        yaxis_title='Número de Alertas',
-        height=400,
-        showlegend=False
+        title=dict(
+            text=f'Comparación con Cajeros en {info_cajero.get("municipio_dane", "la misma zona")}',
+            x=0.5,
+            xanchor='center'
+        ),
+        xaxis_title='Número de Alertas',
+        yaxis_title='',
+        height=max(400, len(df_comparacion_full) * 40),  # Altura dinámica
+        showlegend=False,
+        margin=dict(l=120, r=50, t=60, b=50),
+        plot_bgcolor='white',
+        xaxis=dict(
+            gridcolor='lightgray',
+            showgrid=True
+        ),
+        yaxis=dict(
+            categoryorder='total ascending'  # Orden por valor
+        )
     )
     
     st.plotly_chart(fig_comp, use_container_width=True, config={'displayModeBar': True})
     
     st.caption(f"🔴 Rojo = Cajero {cod_cajero} (actual) | 🔵 Azul = Otros cajeros de la zona")
+    
+    # EXTRA: Mostrar estadísticas de comparación
+    col_stat1, col_stat2, col_stat3 = st.columns(3)
+    
+    with col_stat1:
+        posicion = len(df_comparacion_full) - list(df_comparacion_full['cod_cajero']).index(cod_cajero)
+        st.metric(
+            "Posición en la Zona", 
+            f"{posicion}° de {len(df_comparacion_full)}",
+            help="Ranking por número de alertas"
+        )
+    
+    with col_stat2:
+        promedio_zona = df_comparacion_full[~df_comparacion_full['es_actual']]['num_alertas'].mean()
+        diff = num_alertas - promedio_zona
+        st.metric(
+            "vs Promedio Zona",
+            f"{diff:+.0f} alertas",
+            delta=f"{(diff/promedio_zona*100):+.1f}%" if promedio_zona > 0 else "N/A"
+        )
+    
+    with col_stat3:
+        max_zona = df_comparacion_full[~df_comparacion_full['es_actual']]['num_alertas'].max()
+        if num_alertas >= max_zona:
+            st.metric("Estado", "⚠️ Máximo de la zona", delta_color="inverse")
+        else:
+            st.metric("Estado", "✅ Bajo el máximo", delta_color="normal")
+    
+    # MAPA: Mostrar todos los cajeros de la comparación
+    st.markdown("---")
+    st.markdown("### 🗺️ Ubicación de Cajeros en la Zona")
+    
+    # Obtener coordenadas de todos los cajeros en la comparación
+    query_coords_comparacion = """
+    SELECT 
+        f.cod_cajero,
+        f.latitud,
+        f.longitud,
+        f.municipio_dane,
+        f.departamento
+    FROM features_ml f
+    WHERE f.cod_cajero = ANY(%s)
+      AND f.latitud IS NOT NULL
+      AND f.longitud IS NOT NULL
+    """
+    
+    cajeros_ids = df_comparacion_full['cod_cajero'].tolist()
+    df_coords_zona = execute_query(query_coords_comparacion, params=(cajeros_ids,))
+    
+    if not df_coords_zona.empty:
+        # Agregar información de alertas
+        df_mapa_zona = df_coords_zona.merge(
+            df_comparacion_full[['cod_cajero', 'num_alertas', 'score_promedio', 'es_actual']],
+            on='cod_cajero',
+            how='left'
+        )
+        
+        # Asignar severidad según si es el cajero actual o no
+        df_mapa_zona['severidad'] = df_mapa_zona['es_actual'].apply(
+            lambda x: 'critico' if x else 'alto'
+        )
+        df_mapa_zona['score_anomalia'] = df_mapa_zona['score_promedio']
+        df_mapa_zona['monto_dispensado'] = df_mapa_zona['num_alertas']  # Usar alertas como "monto"
+        df_mapa_zona['descripcion'] = df_mapa_zona.apply(
+            lambda row: f"{'⭐ ' if row['es_actual'] else ''}Cajero {row['cod_cajero']} - {row['num_alertas']} alertas",
+            axis=1
+        )
+        
+        # Crear mapa
+        fig_mapa_zona = crear_mapa_alertas(df_mapa_zona)
+        
+        if fig_mapa_zona:
+            st.plotly_chart(fig_mapa_zona, use_container_width=True, config={'displayModeBar': True})
+            st.caption(f"🔴 Rojo = Cajero {cod_cajero} (actual) | 🟠 Naranja = Otros cajeros de {info_cajero.get('municipio_dane', 'la zona')}")
+        else:
+            st.warning("No se pudo crear el mapa de la zona")
+    else:
+        st.info("No hay coordenadas disponibles para los cajeros de la zona")
+
 else:
     st.info(f"No hay otros cajeros en {info_cajero.get('municipio_dane', 'esta zona')} para comparar")
 
@@ -353,7 +471,7 @@ if not df_alertas_detalle.empty:
     
     st.dataframe(
         df_alertas_detalle.style.apply(resaltar_severidad, axis=1),
-        use_container_width=True,
+        width='stretch',
         column_config={
             'id': None,
             'fecha_hora': st.column_config.DatetimeColumn('Fecha/Hora', format='DD/MM/YYYY HH:mm'),
