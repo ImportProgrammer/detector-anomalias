@@ -15,9 +15,6 @@ parquet
 logs
 fraud_detection_historical
 models
-scripts
-sql
+
 
 # files
-config.yaml
-README.md

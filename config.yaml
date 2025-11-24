@@ -1,0 +1,176 @@
+# ============================================================================
+# CONFIGURACIÓN GENERAL - Sistema de Detección de Fraudes ATM
+# ============================================================================
+
+# RUTAS DEL PROYECTO
+paths:
+  # Raíz del proyecto
+  root: /dados/avc
+  
+  # Datos originales (CSVs por mes)
+  data_csv: /dados/avc/data
+  
+  # Datos consolidados (Parquet)
+  parquet: /dados/avc/parquet
+  
+  # Modelos entrenados
+  models: /dados/avc/models
+  
+  # Logs de ejecución
+  logs: /dados/avc/logs
+  
+  # Outputs (reportes, mapas)
+  outputs: /dados/avc/outputs
+
+  # nuevos scripts de detección
+  fraud_detection_historical: /dados/avc/fraud_detection_historical
+
+# MESES A PROCESAR
+# Estructura: 'Nombre_Carpeta': 'archivo_salida.parquet'
+meses:
+  # 2024
+  '2024/01.Enero': 'enero_2024.parquet'
+  '2024/02.Febrero': 'febrero_2024.parquet'
+  '2024/03.Marzo': 'marzo_2024.parquet'
+  '2024/05.Mayo': 'mayo_2024.parquet'
+  '2024/06.Junio': 'junio_2024.parquet'
+  '2024/07.Julio': 'julio_2024.parquet'
+  '2024/08.Agosto': 'agosto_2024.parquet'
+  '2024/09.Septiembre': 'septiembre_2024.parquet'
+  
+  # 2025
+  '2025/01.Enero': 'enero_2025.parquet'
+  '2025/02.Febrero': 'febrero_2025.parquet'
+  '2025/03.Marzo': 'marzo_2025.parquet'
+  '2025/04.Abril': 'abril_2025.parquet'
+  '2025/05.Mayo': 'mayo_2025.parquet'
+  '2025/06.Junio': 'junio_2025.parquet'
+
+# CONSOLIDACIÓN
+consolidacion:
+  # Tamaño de chunk para procesamiento (archivos por lote)
+  chunk_size: 10
+  
+  # Compresión de Parquet
+  compression: 'snappy'  # snappy, gzip, brotli
+  
+  # Engine de Parquet
+  engine: 'pyarrow'
+  
+  # Nombre del archivo consolidado final
+  archivo_final: 'transacciones_consolidadas.parquet'
+
+# POSTGRESQL + TIMESCALEDB
+postgres:
+  # Conexión
+  host: 'localhost'
+  port: 5432
+  database: 'fraud_detection'
+  user: 'fraud_user'
+  password: 'avcSeguro123!' 
+  
+  # TimescaleDB
+  chunk_interval: '1 week'  
+  time_bucket: '15 minutes' 
+  
+  # Tablas
+  tables:
+    cajeros: 'cajeros'  
+    transacciones: 'transacciones'
+    features: 'features'
+    scores: 'scores'
+    razones_anomalias: 'razones_anomalias'
+    feedback: 'feedback'
+    modelos: 'modelos'
+  
+  # Carga de datos
+  meses_a_cargar: 24  # Últimos 6 meses a PostgreSQL
+  batch_size: 200  # Registros por batch en INSERT
+
+  # Filtros de datos al cargar
+  filtros:
+    # Solo cargar estos tipos de operación
+    tipos_operacion: 
+      - 'Cambio De Pin'
+      - 'Avance'
+      - 'Retiro'
+      - 'Depositos'
+      - 'Transferencias'
+
+    # Requerir que Autorizador tenga información (no NULL ni vacío)
+    autorizador_requerido: true
+
+    # Eliminar duplicados por (Id Tlf, Fecha Transacción)
+    eliminar_duplicados: true
+
+# COLUMNAS IMPORTANTES (para optimización de tipos)
+columnas:
+  # Enteros
+  int_columns:
+    - 'Cod Terminal'
+    - 'Cod Estado Transacción'
+    - 'Cod Tipo Operación'
+    - 'Cantidad Tx'
+    - 'Duplicado'
+  
+  # Flotantes
+  float_columns:
+    - 'Valor Transacción'
+    - 'Valor Transacción Original'
+  
+  # Categóricas
+  categorical_columns:
+    - 'Autorizador'
+    - 'Tipo Operación'
+    - 'Canal'
+    - 'Tipo Convenio'
+    - 'Operación'
+    - 'Adquiriente'
+  
+  # Fechas
+  datetime_columns:
+    - 'Fecha Transacción'
+    - 'Fecha Negocio'
+
+# LOGGING
+logging:
+  level: 'INFO'  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  date_format: '%Y-%m-%d %H:%M:%S'
+  
+  # Archivos de log
+  files:
+    consolidacion: 'consolidacion.log'
+    postgres: 'postgres.log'
+    general: 'sistema.log'
+
+# LÍMITES Y SEGURIDAD
+limits:
+  # Memoria máxima para un DataFrame (GB)
+  max_memory_gb: 50
+  
+  # Número máximo de reintentos en caso de error
+  max_retries: 3
+  
+  # Tiempo de espera entre reintentos (segundos)
+  retry_delay: 10
+
+# FEATURES PARA MODELOS (se calcularán después)
+features:
+  # Features temporales
+  temporal:
+    - 'hora'
+    - 'dia_semana'
+    - 'es_fin_de_semana'
+    - 'es_horario_nocturno'
+    - 'es_madrugada'
+  
+  # Features de monto
+  monto:
+    - 'diferencia_valor'
+    - 'es_retiro_maximo'
+  
+  # Features de velocidad
+  velocidad:
+    - 'tiempo_desde_anterior_seg'
+    - 'es_transaccion_rapida'
