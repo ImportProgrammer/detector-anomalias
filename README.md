@@ -294,16 +294,20 @@ pip install -r requirements.txt
 
 ---
 
-## 📈 Próximas Mejoras
+## 🖨️ Imagenes del proyecto
 
-- [ ] Implementar página de Análisis Detallado
-- [ ] Implementar página de Procesamiento de Datos
-- [ ] Implementar página de Estadísticas
-- [ ] Agregar sistema de alertas por email
-- [ ] Agregar exportación de reportes en PDF
-- [ ] Agregar autenticación de usuarios
-- [ ] Agregar modo oscuro
-- [ ] Agregar refresh automático configurable
+### Home del Proyecto
+![Home](./images/home.png)
+
+
+### Mapa geografico del Proyecto
+![map](./images/map.png)
+![Revision](./images/revision_geografica.png)
+
+### Revisión KPIs Proyecto
+![kpis](./images/comportamiento_anomalias.png)
+![kpis](./images/hist_anomalias.png)
+
 
 ---
 
