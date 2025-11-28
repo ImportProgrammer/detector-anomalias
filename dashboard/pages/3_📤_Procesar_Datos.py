@@ -130,7 +130,10 @@ if uploaded_file is None:
 # ============================================================================
 
 def calcular_features_ml(df_agregado, df_trans_original):
-    """Calcula features necesarias para el modelo ML"""
+    """
+    Calcula features necesarias para el modelo ML
+    VERSIÓN CORREGIDA: Usa features_ml (estadísticas agregadas por cajero)
+    """
     
     df_features = df_agregado.copy()
     
@@ -156,57 +159,201 @@ def calcular_features_ml(df_agregado, df_trans_original):
         (df_features['dia_mes'] >= 29)
     ).astype(int)
     
-    # ========== FEATURES DE DESVIACIÓN ==========
-    # Por cajero
-    stats_cajero = df_features.groupby('cod_cajero')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
-    stats_cajero.columns = ['cod_cajero', 'cajero_mean', 'cajero_std']
-    df_features = df_features.merge(stats_cajero, on='cod_cajero', how='left')
+    # ========== CONSULTAR ESTADÍSTICAS DE BD ==========
+    st.info("🔍 Consultando estadísticas históricas de cajeros (features_ml)...")
+    
+    cajeros_unicos = df_features['cod_cajero'].unique().tolist()
+    
+    # Query para obtener estadísticas agregadas por cajero
+    query_stats_cajero = """
+    SELECT 
+        cod_cajero,
+        dispensacion_promedio as cajero_mean,
+        dispensacion_std as cajero_std,
+        dispensacion_max,
+        dispensacion_min,
+        coef_variacion,
+        num_periodos_15min,
+        anomalias_3std,
+        pct_anomalias_3std
+    FROM features_ml
+    WHERE cod_cajero = ANY(%s)
+    """
+    
+    df_stats_cajero_bd = execute_query(query_stats_cajero, params=(cajeros_unicos,))
+    
+    if not df_stats_cajero_bd.empty:
+        st.success(f"✅ Estadísticas encontradas para {len(df_stats_cajero_bd)} cajeros")
+        
+        # Merge con datos históricos
+        df_features = df_features.merge(
+            df_stats_cajero_bd[['cod_cajero', 'cajero_mean', 'cajero_std']], 
+            on='cod_cajero', 
+            how='left'
+        )
+        
+        # Para cajeros SIN historial, usar stats del archivo actual
+        cajeros_sin_historial = df_features[df_features['cajero_mean'].isna()]['cod_cajero'].unique()
+        
+        if len(cajeros_sin_historial) > 0:
+            st.warning(f"⚠️ {len(cajeros_sin_historial)} cajeros sin historial, usando stats del archivo actual")
+            
+            # Calcular stats solo para cajeros sin historial
+            stats_archivo = df_features[df_features['cod_cajero'].isin(cajeros_sin_historial)].groupby('cod_cajero')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+            stats_archivo.columns = ['cod_cajero', 'mean_archivo', 'std_archivo']
+            
+            # Rellenar los faltantes
+            df_features = df_features.merge(stats_archivo, on='cod_cajero', how='left')
+            df_features['cajero_mean'] = df_features['cajero_mean'].fillna(df_features['mean_archivo'])
+            df_features['cajero_std'] = df_features['cajero_std'].fillna(df_features['std_archivo'])
+            df_features = df_features.drop(columns=['mean_archivo', 'std_archivo'])
+    else:
+        st.warning("⚠️ No hay estadísticas en features_ml. Usando stats del archivo actual.")
+        
+        # Fallback: calcular del archivo actual
+        stats_cajero = df_features.groupby('cod_cajero')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+        stats_cajero.columns = ['cod_cajero', 'cajero_mean', 'cajero_std']
+        df_features = df_features.merge(stats_cajero, on='cod_cajero', how='left')
+    
+    # Calcular z_score_vs_cajero con datos históricos
     df_features['z_score_vs_cajero'] = (
         (df_features['monto_total_dispensado'] - df_features['cajero_mean']) / 
         df_features['cajero_std'].replace(0, 1)
     ).fillna(0)
     
-    # Por hora del día
-    stats_hora = df_features.groupby('hora_del_dia')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
-    stats_hora.columns = ['hora_del_dia', 'hora_mean', 'hora_std']
-    df_features = df_features.merge(stats_hora, on='hora_del_dia', how='left')
+    # ========== ESTADÍSTICAS POR HORA (calcular de alertas_dispensacion) ==========
+    query_stats_hora = """
+    SELECT 
+        EXTRACT(HOUR FROM fecha_hora) as hora_del_dia,
+        AVG(monto_dispensado) as hora_mean,
+        STDDEV(monto_dispensado) as hora_std
+    FROM alertas_dispensacion
+    --WHERE fecha_hora >= NOW() - INTERVAL '90 days'
+    GROUP BY EXTRACT(HOUR FROM fecha_hora)
+    """
+    
+    df_stats_hora_bd = execute_query(query_stats_hora)
+    
+    if not df_stats_hora_bd.empty:
+        df_stats_hora_bd['hora_del_dia'] = df_stats_hora_bd['hora_del_dia'].astype(int)
+        df_features = df_features.merge(df_stats_hora_bd, on='hora_del_dia', how='left')
+        
+        # Rellenar horas sin historial con stats del archivo
+        mask_sin_hora = df_features['hora_mean'].isna()
+        if mask_sin_hora.any():
+            stats_hora_archivo = df_features[mask_sin_hora].groupby('hora_del_dia')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+            stats_hora_archivo.columns = ['hora_del_dia', 'hora_mean_archivo', 'hora_std_archivo']
+            df_features = df_features.merge(stats_hora_archivo, on='hora_del_dia', how='left')
+            df_features['hora_mean'] = df_features['hora_mean'].fillna(df_features['hora_mean_archivo'])
+            df_features['hora_std'] = df_features['hora_std'].fillna(df_features['hora_std_archivo'])
+            df_features = df_features.drop(columns=['hora_mean_archivo', 'hora_std_archivo'])
+    else:
+        # Fallback
+        stats_hora = df_features.groupby('hora_del_dia')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+        stats_hora.columns = ['hora_del_dia', 'hora_mean', 'hora_std']
+        df_features = df_features.merge(stats_hora, on='hora_del_dia', how='left')
+    
     df_features['z_score_vs_hora'] = (
         (df_features['monto_total_dispensado'] - df_features['hora_mean']) / 
         df_features['hora_std'].replace(0, 1)
     ).fillna(0)
     
-    # Por día de semana
-    stats_dia = df_features.groupby('dia_semana')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
-    stats_dia.columns = ['dia_semana', 'dia_mean', 'dia_std']
-    df_features = df_features.merge(stats_dia, on='dia_semana', how='left')
+    # ========== ESTADÍSTICAS POR DÍA DE SEMANA (calcular de alertas_dispensacion) ==========
+    query_stats_dia = """
+    SELECT 
+        EXTRACT(DOW FROM fecha_hora) as dia_semana,
+        AVG(monto_dispensado) as dia_mean,
+        STDDEV(monto_dispensado) as dia_std
+    FROM alertas_dispensacion
+    --WHERE fecha_hora >= NOW() - INTERVAL '90 days'
+    GROUP BY EXTRACT(DOW FROM fecha_hora)
+    """
+    
+    df_stats_dia_bd = execute_query(query_stats_dia)
+    
+    if not df_stats_dia_bd.empty:
+        df_stats_dia_bd['dia_semana'] = df_stats_dia_bd['dia_semana'].astype(int)
+        df_features = df_features.merge(df_stats_dia_bd, on='dia_semana', how='left')
+        
+        # Rellenar días sin historial
+        mask_sin_dia = df_features['dia_mean'].isna()
+        if mask_sin_dia.any():
+            stats_dia_archivo = df_features[mask_sin_dia].groupby('dia_semana')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+            stats_dia_archivo.columns = ['dia_semana', 'dia_mean_archivo', 'dia_std_archivo']
+            df_features = df_features.merge(stats_dia_archivo, on='dia_semana', how='left')
+            df_features['dia_mean'] = df_features['dia_mean'].fillna(df_features['dia_mean_archivo'])
+            df_features['dia_std'] = df_features['dia_std'].fillna(df_features['dia_std_archivo'])
+            df_features = df_features.drop(columns=['dia_mean_archivo', 'dia_std_archivo'])
+    else:
+        # Fallback
+        stats_dia = df_features.groupby('dia_semana')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+        stats_dia.columns = ['dia_semana', 'dia_mean', 'dia_std']
+        df_features = df_features.merge(stats_dia, on='dia_semana', how='left')
+    
     df_features['z_score_vs_dia_semana'] = (
         (df_features['monto_total_dispensado'] - df_features['dia_mean']) / 
         df_features['dia_std'].replace(0, 1)
     ).fillna(0)
     
-    # Percentil vs mes
+    # ========== PERCENTIL VS MES (del archivo actual es OK) ==========
     df_features['percentil_vs_mes'] = df_features.groupby('mes')['monto_total_dispensado'].rank(pct=True)
     
     # ========== FEATURES DE TENDENCIA ==========
+    st.info("🔍 Consultando historial para tendencias temporales...")
+    
     df_features = df_features.sort_values(['cod_cajero', 'bucket_15min'])
     
-    # Cambio vs anterior (mismo cajero)
-    df_features['cambio_vs_anterior'] = df_features.groupby('cod_cajero')['monto_total_dispensado'].diff().fillna(0)
+    # Query para obtener historial reciente (últimas 48h) de alertas_dispensacion
+    query_historial_tendencias = """
+    SELECT 
+        cod_cajero,
+        fecha_hora as bucket_15min,
+        monto_dispensado as monto_total_dispensado
+    FROM alertas_dispensacion
+    WHERE cod_cajero = ANY(%s)
+      --AND fecha_hora >= NOW() - INTERVAL '48 hours'
+    ORDER BY cod_cajero, fecha_hora
+    """
     
-    # Cambio vs mismo momento ayer (96 períodos = 24h en ventanas de 15min)
-    df_features['cambio_vs_ayer'] = df_features.groupby('cod_cajero')['monto_total_dispensado'].diff(96).fillna(0)
+    df_historial_bd = execute_query(query_historial_tendencias, params=(cajeros_unicos,))
     
-    # Tendencia últimas 24h (promedio móvil)
-    df_features['tendencia_24h'] = (
-        df_features.groupby('cod_cajero')['monto_total_dispensado']
-        .transform(lambda x: x.rolling(window=96, min_periods=1).mean())
-    )
-    
-    # Volatilidad reciente (std últimas 24h)
-    df_features['volatilidad_reciente'] = (
-        df_features.groupby('cod_cajero')['monto_total_dispensado']
-        .transform(lambda x: x.rolling(window=96, min_periods=1).std())
-    ).fillna(0)
+    if not df_historial_bd.empty:
+        st.success(f"✅ {len(df_historial_bd):,} ventanas históricas cargadas para tendencias")
+        
+        # Combinar historial de BD con datos nuevos
+        df_combinado = pd.concat([df_historial_bd, df_features[['cod_cajero', 'bucket_15min', 'monto_total_dispensado']]], ignore_index=True)
+        df_combinado = df_combinado.sort_values(['cod_cajero', 'bucket_15min'])
+        df_combinado = df_combinado.drop_duplicates(subset=['cod_cajero', 'bucket_15min'], keep='last')
+        
+        # Calcular features de tendencia con datos completos
+        df_combinado['cambio_vs_anterior'] = df_combinado.groupby('cod_cajero')['monto_total_dispensado'].diff().fillna(0)
+        df_combinado['cambio_vs_ayer'] = df_combinado.groupby('cod_cajero')['monto_total_dispensado'].diff(96).fillna(0)
+        df_combinado['tendencia_24h'] = (
+            df_combinado.groupby('cod_cajero')['monto_total_dispensado']
+            .transform(lambda x: x.rolling(window=96, min_periods=1).mean())
+        )
+        df_combinado['volatilidad_reciente'] = (
+            df_combinado.groupby('cod_cajero')['monto_total_dispensado']
+            .transform(lambda x: x.rolling(window=96, min_periods=1).std())
+        ).fillna(0)
+        
+        # Extraer solo las ventanas del archivo nuevo
+        df_tendencias = df_combinado[df_combinado['bucket_15min'].isin(df_features['bucket_15min'])]
+        
+        # Merge con df_features
+        df_features = df_features.merge(
+            df_tendencias[['cod_cajero', 'bucket_15min', 'cambio_vs_anterior', 'cambio_vs_ayer', 'tendencia_24h', 'volatilidad_reciente']],
+            on=['cod_cajero', 'bucket_15min'],
+            how='left'
+        )
+    else:
+        st.warning("⚠️ No hay historial reciente. Features de tendencia limitadas.")
+        
+        # Fallback: calcular solo con datos del archivo (limitado)
+        df_features['cambio_vs_anterior'] = df_features.groupby('cod_cajero')['monto_total_dispensado'].diff().fillna(0)
+        df_features['cambio_vs_ayer'] = 0  # No disponible sin historial
+        df_features['tendencia_24h'] = df_features['monto_total_dispensado']  # Usar valor actual
+        df_features['volatilidad_reciente'] = 0  # No disponible sin historial
     
     # ========== LIMPIAR ==========
     df_features = df_features.replace([np.inf, -np.inf], 0)
@@ -217,7 +364,109 @@ def calcular_features_ml(df_agregado, df_trans_original):
                     'dia_mean', 'dia_std', 'dia_mes', 'dias_en_mes']
     df_features = df_features.drop(columns=[c for c in cols_to_drop if c in df_features.columns])
     
+    # Mostrar resumen de features calculadas
+    with st.expander("📊 Resumen de Features Calculadas"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Ventanas", f"{len(df_features):,}")
+        with col2:
+            z_score_max = df_features['z_score_vs_cajero'].abs().max()
+            st.metric("Max |z-score|", f"{z_score_max:.1f}")
+        with col3:
+            anomalos = (df_features['z_score_vs_cajero'].abs() > 3).sum()
+            st.metric("Ventanas > 3σ", f"{anomalos:,}")
+    
     return df_features
+
+# def calcular_features_ml(df_agregado, df_trans_original):
+#     """Calcula features necesarias para el modelo ML"""
+    
+#     df_features = df_agregado.copy()
+    
+#     # Renombrar para coincidir con el modelo
+#     df_features = df_features.rename(columns={
+#         'monto_dispensado': 'monto_total_dispensado'
+#     })
+    
+#     # ========== FEATURES TEMPORALES ==========
+#     df_features['hora_del_dia'] = df_features['bucket_15min'].dt.hour
+#     df_features['dia_semana'] = df_features['bucket_15min'].dt.dayofweek
+#     df_features['mes'] = df_features['bucket_15min'].dt.month
+#     df_features['es_fin_de_semana'] = df_features['dia_semana'].isin([5, 6]).astype(int)
+    
+#     # Fin de mes: últimos 3 días del mes
+#     df_features['dia_mes'] = df_features['bucket_15min'].dt.day
+#     df_features['dias_en_mes'] = df_features['bucket_15min'].dt.days_in_month
+#     df_features['es_fin_de_mes'] = (df_features['dias_en_mes'] - df_features['dia_mes'] <= 3).astype(int)
+    
+#     # Quincena: días 14-16 o 29-31
+#     df_features['es_quincena'] = (
+#         ((df_features['dia_mes'] >= 14) & (df_features['dia_mes'] <= 16)) |
+#         (df_features['dia_mes'] >= 29)
+#     ).astype(int)
+    
+#     # ========== FEATURES DE DESVIACIÓN ==========
+#     # Por cajero
+#     stats_cajero = df_features.groupby('cod_cajero')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+#     stats_cajero.columns = ['cod_cajero', 'cajero_mean', 'cajero_std']
+#     df_features = df_features.merge(stats_cajero, on='cod_cajero', how='left')
+#     df_features['z_score_vs_cajero'] = (
+#         (df_features['monto_total_dispensado'] - df_features['cajero_mean']) / 
+#         df_features['cajero_std'].replace(0, 1)
+#     ).fillna(0)
+    
+#     # Por hora del día
+#     stats_hora = df_features.groupby('hora_del_dia')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+#     stats_hora.columns = ['hora_del_dia', 'hora_mean', 'hora_std']
+#     df_features = df_features.merge(stats_hora, on='hora_del_dia', how='left')
+#     df_features['z_score_vs_hora'] = (
+#         (df_features['monto_total_dispensado'] - df_features['hora_mean']) / 
+#         df_features['hora_std'].replace(0, 1)
+#     ).fillna(0)
+    
+#     # Por día de semana
+#     stats_dia = df_features.groupby('dia_semana')['monto_total_dispensado'].agg(['mean', 'std']).reset_index()
+#     stats_dia.columns = ['dia_semana', 'dia_mean', 'dia_std']
+#     df_features = df_features.merge(stats_dia, on='dia_semana', how='left')
+#     df_features['z_score_vs_dia_semana'] = (
+#         (df_features['monto_total_dispensado'] - df_features['dia_mean']) / 
+#         df_features['dia_std'].replace(0, 1)
+#     ).fillna(0)
+    
+#     # Percentil vs mes
+#     df_features['percentil_vs_mes'] = df_features.groupby('mes')['monto_total_dispensado'].rank(pct=True)
+    
+#     # ========== FEATURES DE TENDENCIA ==========
+#     df_features = df_features.sort_values(['cod_cajero', 'bucket_15min'])
+    
+#     # Cambio vs anterior (mismo cajero)
+#     df_features['cambio_vs_anterior'] = df_features.groupby('cod_cajero')['monto_total_dispensado'].diff().fillna(0)
+    
+#     # Cambio vs mismo momento ayer (96 períodos = 24h en ventanas de 15min)
+#     df_features['cambio_vs_ayer'] = df_features.groupby('cod_cajero')['monto_total_dispensado'].diff(96).fillna(0)
+    
+#     # Tendencia últimas 24h (promedio móvil)
+#     df_features['tendencia_24h'] = (
+#         df_features.groupby('cod_cajero')['monto_total_dispensado']
+#         .transform(lambda x: x.rolling(window=96, min_periods=1).mean())
+#     )
+    
+#     # Volatilidad reciente (std últimas 24h)
+#     df_features['volatilidad_reciente'] = (
+#         df_features.groupby('cod_cajero')['monto_total_dispensado']
+#         .transform(lambda x: x.rolling(window=96, min_periods=1).std())
+#     ).fillna(0)
+    
+#     # ========== LIMPIAR ==========
+#     df_features = df_features.replace([np.inf, -np.inf], 0)
+#     df_features = df_features.fillna(0)
+    
+#     # Eliminar columnas auxiliares
+#     cols_to_drop = ['cajero_mean', 'cajero_std', 'hora_mean', 'hora_std', 
+#                     'dia_mean', 'dia_std', 'dia_mes', 'dias_en_mes']
+#     df_features = df_features.drop(columns=[c for c in cols_to_drop if c in df_features.columns])
+    
+#     return df_features
 
 def seleccionar_features_modelo(df_features):
     """Selecciona las columnas necesarias para el modelo"""
@@ -514,7 +763,9 @@ try:
         '8': 'Otros'
     }
     
-    codigos_procesar = {'2', '3', '4'}
+    ## TODOS: CODIGOS PARA FILTRAR LOS ARCHIVOS DE 15 MIN
+    # codigos_procesar = {'2', '3', '4'}
+    codigos_procesar = {'2'}
     
     for i, line in enumerate(lines):
         if not line.strip():
